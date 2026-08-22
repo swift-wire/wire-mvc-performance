@@ -1,0 +1,68 @@
+// swift-tools-version: 6.4
+import PackageDescription
+
+// A benchmark harness for WireMVC's per-request cost, isolated in its own package so no shipping target
+// carries a benchmark dependency, and so the servers under test can be assembled by hand rather than
+// through codegen.
+//
+// tools-version 6.4 and macOS 26 because WireMVC is proposal-native (it dispatches over
+// swift-http-api-proposal's `HTTPServer`), which is the floor its runtimes already sit on.
+let package = Package(
+    name: "wire-mvc-performance",
+    platforms: [.macOS(.v26)],
+    products: [
+        .executable(name: "wire-mvc-performance", targets: ["WireMVCPerformance"])
+    ],
+    dependencies: [
+        // The `ServerTransport` trait is what the bridged scenario measures.
+        .package(url: "https://github.com/tachyonics/wire-mvc.git", branch: "main", traits: ["ServerTransport"]),
+        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
+        .package(url: "https://github.com/swift-server/swift-openapi-hummingbird.git", from: "2.0.0"),
+        .package(url: "https://github.com/vapor/vapor.git", from: "4.115.0"),
+        .package(url: "https://github.com/swift-server/swift-openapi-vapor.git", from: "1.0.0"),
+        .package(url: "https://github.com/swift-server/swift-http-server.git", branch: "main"),
+        .package(url: "https://github.com/apple/swift-http-api-proposal.git", .upToNextMinor(from: "0.2.0")),
+        .package(url: "https://github.com/apple/swift-http-types.git", from: "1.6.0"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.13.2"),
+        .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.0.0"),
+        // The one client every scenario is driven with — the point of the harness is that this is
+        // identical across them, so a difference is server-side.
+        .package(
+            url: "https://github.com/swift-server/async-http-client.git",
+            exact: "1.35.0",
+            traits: ["UnstableHTTPAPIsSupport"]
+        ),
+    ],
+    targets: [
+        .executableTarget(
+            name: "WireMVCPerformance",
+            dependencies: [
+                .product(name: "WireMVC", package: "wire-mvc"),
+                .product(name: "WireMVCRouter", package: "wire-mvc"),
+                .product(name: "WireMVCServerTransport", package: "wire-mvc"),
+                .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "OpenAPIHummingbird", package: "swift-openapi-hummingbird"),
+                .product(name: "Vapor", package: "vapor"),
+                .product(name: "OpenAPIVapor", package: "swift-openapi-vapor"),
+                .product(name: "NIOHTTPServer", package: "swift-http-server"),
+                .product(name: "HTTPAPIs", package: "swift-http-api-proposal"),
+                .product(name: "HTTPTypes", package: "swift-http-types"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
+            ],
+            swiftSettings: [
+                .strictMemorySafety(),
+                .enableExperimentalFeature("SuppressedAssociatedTypesWithDefaults"),
+                .enableExperimentalFeature("LifetimeDependence"),
+                .enableExperimentalFeature("Lifetimes"),
+                .enableUpcomingFeature("LifetimeDependence"),
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+                .enableUpcomingFeature("InferIsolatedConformances"),
+                .enableUpcomingFeature("ExistentialAny"),
+                .enableUpcomingFeature("MemberImportVisibility"),
+                .enableUpcomingFeature("InternalImportsByDefault"),
+            ]
+        )
+    ]
+)
