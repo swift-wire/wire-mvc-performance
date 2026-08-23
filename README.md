@@ -9,87 +9,83 @@ taken with *different harnesses*.
 
 ## Results
 
-Two dimensions, not one: **the layer a request traverses**, and **how the response is framed**. Framing is
-here rather than in a footnote because holding it constant for some scenarios and not others produced the
-largest error this harness has made — see [the framing bug](#the-framing-bug).
+Every scenario runs **alone** — one server alive at a time — in six short rounds, visited in a different
+order each round. That matters more than it sounds: see [the ordering
+problem](#the-ordering-problem-and-what-it-invalidated), which produced a reproducible ~3 µs of fake signal
+until it was found.
 
-Every scenario can now be run either way, so both columns are internally matched: a delta always subtracts
-two scenarios framed alike. One caveat carries throughout. The proposal server is chunked by *omitting*
-`Content-Length`; Hummingbird and Vapor derive a length from a `ByteBuffer` body, so there is no header to
-omit and their chunked rows use a **streamed body** instead. That is a different code path, not the same
-one framed differently, and their chunked p50 carries the streaming machinery as well as the framing.
+Numbers below are p50 from a representative run, with the range across three runs where it is wide.
 
-### Layer 0 — the servers themselves
+### The floors — the servers themselves, routerless
 
-Routerless. The floor every framework sits on, and the reason each framework is compared to *itself*.
-
-| server | framing | min | p50 | p90 | p99 |
-|---|---|---|---|---|---|
-| `hummingbird-raw` | length | 59.17 | 76.21 | 84.08 | 97.75 |
-| `hummingbird-raw` | chunked | 60.46 | 83.25 | 91.33 | **109.50** |
-| `vapor-raw` | length | 52.00 | 71.12 | 77.92 | 88.79 |
-| `vapor-raw` | chunked | 63.42 | 76.38 | 84.33 | **103.12** |
-| `proposal-plain` | length | 59.12 | 82.08 | 89.42 | 102.58 |
-| `proposal-plain` | chunked | 68.62 | 83.21 | 107.58 | **121.46** |
-
-**Chunking costs a p99 tail on every server, with no framework and no router involved**: +11.8 µs on
-Hummingbird, +14.3 µs on Vapor, +18.9 µs on the proposal server. So the tail is a property of chunked
-framing on this stack — NIO's encoder and `AsyncHTTPClient`'s decoder — and not of any one server.
-
-The medians separate the two effects. The proposal server, where chunked really is just the missing
-header, moves +1.1 µs at p50 but +18.2 µs at p90; the tail is nearly the whole cost. Hummingbird and
-Vapor move +7.0 and +5.3 µs at p50, because their chunked rows also pay for a streamed body. The tail
-survives in all three regardless.
-
-### Layer 1 — with a router
-
-#### Length-framed — what ships today
-
-| scenario | min | p50 | p90 | p99 |
+| server | min | p50 | p90 | p99 |
 |---|---|---|---|---|
-| `hummingbird-plain` | 59.79 | 76.00 | 84.62 | 98.71 |
-| `hummingbird-bridged` | 69.42 | 92.33 | 99.96 | 115.83 |
-| `vapor-plain` | 54.33 | 75.17 | 81.79 | 92.79 |
-| `vapor-bridged` | 90.29 | 122.83 | 130.58 | 148.96 |
-| `proposal-plain-served` | 59.58 | 79.62 | 87.00 | 100.33 |
-| `proposal-native` | 59.54 | 81.58 | 89.54 | 102.88 |
+| `vapor-raw` | 60.08 | **69.04** | 76.46 | 85.67 |
+| `hummingbird-raw` | 65.46 | **73.21** | 79.42 | 91.50 |
+| `proposal-plain` | 68.75 | **78.00** | 83.54 | 95.17 |
 
-#### Chunked — what WireMVC shipped before the fix
+The proposal server is ~5 µs above Hummingbird's and ~9 above Vapor's, consistently. Why is not measured
+here — the handlers differ slightly (the proposal one drains its reader explicitly) and nothing has been
+attributed inside the server.
 
-| scenario | min | p50 | p90 | p99 |
-|---|---|---|---|---|
-| `hummingbird-plain` | 62.00 | 84.04 | 92.29 | 110.38 |
-| `hummingbird-bridged` | 80.46 | 107.29 | 116.92 | 132.92 |
-| `vapor-plain` | 63.50 | 80.46 | 88.17 | 107.08 |
-| `vapor-bridged` | 105.12 | 148.00 | 156.08 | 176.92 |
-| `proposal-plain-served` | 68.62 | 81.33 | 103.67 | 118.79 |
-| `proposal-native` | 70.04 | 83.12 | 106.71 | 121.58 |
+### What each router costs, against its own routerless floor
 
-### What each layer costs
+| router | min | p50 | p50 across runs |
+|---|---|---|---|
+| **WireMVC's** | +2.25 | **+0.54** | −0.17 … +0.54 |
+| Hummingbird's | −0.21 | **+0.71** | +0.71 … +1.21 |
+| Vapor's | +2.54 | **+3.33** | +3.33 … +3.54 |
 
-Each figure subtracts a framework's own bare server from itself-plus-a-layer, which cancels the HTTP
-server out. Both sides of every subtraction share a framing.
+WireMVC's router and Hummingbird's are within a microsecond of each other and of zero; Vapor's is
+reproducibly ~3.4 µs. That ordering is stable across runs, unlike anything measured before the driver was
+fixed.
 
-| layer | length p50 | length p99 | chunked p50 | chunked p99 | allocs/req |
-|---|---|---|---|---|---|
-| Hummingbird's own router | −0.21 | +0.96 | +0.79 | +0.88 | 0.0 |
-| Vapor's own router | +4.04 | +4.00 | +4.08 | +3.96 | 20.0 |
-| WireMVC's own router + tiers | +1.96 | +2.54 | +1.79 | +2.79 | 3.0 |
-| WireMVC through the bridge, Hummingbird | **+16.33** | +17.13 | +23.25 | +22.54 | 46.2 |
-| WireMVC through the bridge, Vapor | **+47.67** | +56.17 | +67.54 | +69.83 | 105.1 |
+### One contributed response header
 
-Allocation counts are the length-framed ones.
+Each framework adds one field on the way out, through whatever mechanism it offers, priced against its own
+plain routed scenario.
 
-### What it adds up to
+| mechanism | min | p50 | p50 across runs |
+|---|---|---|---|
+| Hummingbird `RouterMiddleware` | +0.75 | **+0.50** | +0.50 … +1.08 |
+| Vapor `Middleware` (future-based) | +1.25 | **+1.25** | — |
+| **WireMVC registry + applying** | −0.12 | **+1.42** | +1.42 … +2.88 |
+| Vapor `AsyncMiddleware` | +15.42 | **+15.92** | +15.13 … +15.92 |
 
-- **WireMVC's own path costs ~2 µs, and the same ~2 µs under either framing.** That is the whole point of
-  the chunked column: WireMVC is not what chunking costs. It merely omitted the header that avoided it,
-  and then appeared to cost 20 µs because it was being compared against something length-framed.
-- **The bridge is the expense**: +16.33 µs on Hummingbird and +47.67 µs on Vapor, 8× and 24× the native
-  path. It is also where chunking hurts most — the bridge's chunked cost rises to +23.25 and +67.54, so
-  the bridge amplifies framing cost rather than merely passing it through.
-- **The routers agree with themselves across framings** (Hummingbird ~0, Vapor ~+4 µs at both p50s),
-  which is the check that the two columns are measuring what they claim to.
+WireMVC's mechanism costs about a microsecond more than Hummingbird's, which is consistent with the
+in-process bisection putting the whole thing at ~0.8 µs against Hummingbird's near-zero. It has to
+construct the field set — see [why](#why-wiremvcs-header-mechanism-costs-more-by-design) — where the other
+two mutate a `Response` object that already exists.
+
+**Vapor's `AsyncMiddleware` costs ~16 µs per middleware, and that is not Vapor's middleware.** A second
+one costs another ~14, so it is per-middleware rather than one-off chain construction; the same header
+through Vapor's *native* future-based `Middleware` costs +1.25. The ~16 µs is the `async`↔`EventLoopFuture`
+bridge in the shim.
+
+### The bridge
+
+| | min | p50 | p99 |
+|---|---|---|---|
+| Hummingbird | +8.75 | **+16.25** | +19.88 |
+| Vapor | +22.71 | **+45.83** | +47.50 |
+
+Mounting a controller through `ServerTransport` costs an order of magnitude more than everything else here
+combined — two currency conversions per direction, an unstructured `Task` per request, and a
+`ResponseChannel` rendezvous. WireMVC on its own native path costs +0.62 µs at p50 over the bare server.
+
+### Why WireMVC's header mechanism costs more, by design
+
+Hummingbird's `Response` is a struct with `var headers`; Vapor's is a class. Their middleware runs on the
+way *out*, receives a fully-built response, and assigns a field — nothing has reached the socket yet.
+
+The proposal hands a handler a **sender**, not a return slot. `HTTPResponse` is constructed and immediately
+consumed, so by the time an outer middleware resumes, the head is on the wire. There is no response object
+to mutate. A contribution therefore has to be registered on the way in and applied at the moment of
+writing, which is the registry plus `ResponseHeaderApplyingSender`.
+
+So WireMVC pays *construction* where the others pay *mutation* — the cost of the head reaching the socket
+as soon as the handler decides it, which is what makes streaming start promptly. A trade, not an
+inefficiency.
 
 ### Where the time goes — allocations
 
@@ -203,6 +199,55 @@ Note that the first two do not exist on a *bridged* runtime at all: there the ho
 path and parameters arrive as `metadata.pathParameters`, so `FrozenRouteTrie.resolve` never runs. The two
 clearest wins here are native-path-only.
 
+### The ordering problem, and what it invalidated
+
+For most of this harness's life, scenarios were driven **round-robin with every server running at once** —
+one request each per pass, in a fixed order. That was itself a fix: measuring scenarios one after another
+gives each its own slice of wall-clock, so machine drift lands on whichever was running and is reported as
+its cost.
+
+Interleaving fixed drift and introduced two artefacts that were worse for being reproducible.
+
+**Position bias.** A request issued straight after a request to a slow server is itself slower. A fixed
+ring means a fixed predecessor, so the handicap is permanent. `proposal-plain` sat behind `vapor-bridged`
+(~120 µs) and read 2.6–3.7 µs above `proposal-plain-served` — while the two run *identically* as a pair:
+
+| ring contents | `proposal-plain` | `proposal-plain-served` | spread |
+|---|---|---|---|
+| the two alone | 76.67 | 76.83 | 0.00 |
+| + a slow neighbour ahead of `plain` | 80.33 | 77.71 | **+2.62** |
+| + a fast neighbour instead | 76.42 | 76.79 | −0.37 |
+| all fifteen | 83.33 | 80.00 | **+3.33** |
+
+Those two scenarios run the **same handler on the same server**, differing only in whether `server.serve`
+or `WireMVC.serve` starts it. Their true difference is nothing, which makes them the harness's control —
+and it read −2.5 µs on average across twelve consecutive runs.
+
+**Crowding.** Fifteen servers alive at once contend for threads, event loops and cache. The same two
+scenarios measure ~76.7 µs as a pair and ~80–83 in a fifteen-scenario ring, so every number was inflated
+before any comparison started.
+
+**Rotating the ring does not fix it.** Rotation preserves the cycle — scenario *i* is still preceded by
+*i−1*; only the pass boundary moves. That was tried first and measured no better.
+
+The driver now runs **one server at a time** in **six shuffled rounds**. The control:
+
+```
+fixed-order ring   −2.25 −2.38 −2.46 −2.46 −2.50 −2.58 −2.62 −2.71 −2.83 −2.87 −3.12 −3.33
+isolated, shuffled −0.54 −0.13 −0.71
+```
+
+**This invalidated every socketed comparison taken before it.** Under the old driver WireMVC's router read
+**−3.21 µs** — a negative cost, reported here as "indistinguishable from Hummingbird's". It is +0.54, and
+Hummingbird's is +0.71; the conclusion survives, but it was luck. The in-process numbers were never
+affected, and now corroborate rather than contradict the socketed ones — which is the first time in this
+harness's history the two instruments have agreed.
+
+Two consequences for reading the tables. **Prefer p50 over min**: restarting servers each round produces
+more distinct warm-up states, so minima catch outliers (the control has shown min −11 µs while its p50 sat
+at +0.5). And **p99 is noisier than it was**, because each scenario's tail is now sampled in six shorter
+bursts; a tail question wants more rounds rather than more iterations.
+
 ### The framing bug
 
 `proposal-native` used to sit ~+11 µs at the minimum and ~+20 µs at p99 above the bare handler over a
@@ -276,21 +321,23 @@ the floors are not the same floor and the frameworks' routers cannot be priced a
 | `vapor-bridged` | the same route through `WireMVCServerTransport` | WireMVC **+ the bridge** |
 | `proposal-plain` | a hand-written handler via `NIOHTTPServer.serve` | the proposal server's floor |
 | `proposal-plain-served` | the same handler via `WireMVC.serve` | the **serving path** alone |
+| `proposal-routed` | WireMVC's trie on the bare server, no courier | WireMVC's **router alone**, scope-matched to the `plain` rows |
 | `proposal-native` | the same route through WireMVC's own router | WireMVC **alone** |
 
 Subtracting each framework's bare scenario from its WireMVC scenario cancels the HTTP server out.
 Comparing *across* frameworks would not isolate anything — the three bare servers span ~5 µs before WireMVC
 is involved at all, which the harness prints separately so it is not mistaken for signal.
 
-**Reported as a distribution, not a mean.** Benchmark noise is one-sided: scheduling, page faults and
-GC-like effects only ever make a request slower, so the minimum is the closest estimate of the cost itself
-and the percentiles say how often something else happened. A mean hides both. Every request's latency is
-kept, not per-round averages — the framing bug showed up first as a fat p99 and would have been invisible
-in a round mean.
+**Reported as a distribution, not a mean.** Every request's latency is kept, not per-round averages — the
+framing bug showed up first as a fat p99 and would have been invisible in a round mean. Read **p50** as the
+primary figure: under the isolated driver each round restarts its server, which gives minima more distinct
+warm-up states to catch, so the minimum is no longer the steadiest column.
 
-**Scenarios are interleaved, not run in sequence.** One pass of the ring per iteration, so consecutive
-samples of different scenarios are adjacent in time and machine state cannot drift between them and be
-attributed to a scenario. `SEQUENTIAL=1` restores the old behaviour.
+**Each scenario runs alone, in shuffled rounds.** One server alive at a time, six rounds, a different
+order each round. Running them concurrently in a fixed ring inflates every number and gives each scenario a
+permanent handicap from whatever precedes it — see [the ordering
+problem](#the-ordering-problem-and-what-it-invalidated). `SEQUENTIAL=1` restores one-long-slice-per-scenario,
+for reproducing the drift artefact that interleaving originally existed to avoid.
 
 **Framing is held constant.** Every scenario states a `Content-Length`. This has to be deliberate: a
 scenario that omits it is chunked, and is then being compared with length-framed ones on more than the
@@ -299,7 +346,7 @@ axis being studied. `FRAMING=chunked` varies it on purpose.
 ### What this does not measure
 
 - **Anything at the scale of WireMVC's own path.** The socketed numbers carry ~60 µs of client and kernel
-  with a tail of its own; a ~1 µs component cannot be resolved through it, interleaved or not. Use the
+  with a tail of its own; a ~1 µs component is at the edge of what it can resolve. Use the
   in-process pass at that scale — and treat a disagreement between the two as a finding rather than as
   noise, which is how the framing bug surfaced.
 - **Concurrency.** Requests are issued sequentially, so this is latency under no contention. The bridge's
@@ -326,14 +373,26 @@ swiftly run swift run -c release
 
 **Release builds only.** A debug build measures the optimiser's absence, not the framework.
 
+**Update the pin first.** `Package.resolved` is not committed and `wire-mvc` is tracked by branch, so a
+checkout keeps whatever revision it first resolved — indefinitely. This harness silently measured a
+three-commit-stale library for a whole afternoon, and only gave itself away when a scenario contradicted a
+fix that had already merged. Before trusting any number:
+
+```sh
+swiftly run swift package update wire-mvc
+```
+
+And if you have been iterating on the library locally with `swift package edit`, `swift package unedit
+wire-mvc` before quoting anything as reflecting merged main — an edited checkout reads your working tree.
+
 Knobs, all environment variables:
 
 ```sh
-ITERATIONS=20000 WARMUP=2000 ROUNDS=3 swiftly run swift run -c release   # the defaults
+ITERATIONS=20000 WARMUP=2000 ROUNDS=6 swiftly run swift run -c release   # the defaults
 SCENARIOS=proposal-plain,proposal-native swiftly run swift run -c release  # a subset
 SCENARIOS=none swiftly run swift run -c release          # the in-process pass alone
 SKIP_INPROCESS=1 swiftly run swift run -c release        # the socketed scenarios alone
-SEQUENTIAL=1 swiftly run swift run -c release            # no interleaving, for reproducing that artefact
+SEQUENTIAL=1 swiftly run swift run -c release            # one long slice each, the drift artefact
 FRAMING=chunked swiftly run swift run -c release         # omit Content-Length, as WireMVC once did
 PROBE=1 swiftly run swift run -c release                 # print each scenario's response headers and exit
 ```
@@ -352,6 +411,10 @@ DYLD_INSERT_LIBRARIES=/tmp/allocount.dylib SCENARIOS=vapor-bridged ITERATIONS=20
 
 Run two scenarios with the same `ITERATIONS` and `WARMUP` and subtract; divide by the total request count
 (iterations + warmup). The counts are process-wide, so only differences mean anything.
+
+`ITERATIONS` is the total per scenario and `ROUNDS` is how many slices it is split into. Rounds are what
+average drift out under the isolated driver, so raising them costs nothing and tightens the control: six
+measurably beat three, three beat one.
 
 Expect the absolute numbers to move with machine, kernel and toolchain. The *differences* between
 scenarios are what the harness is for, and they should be stable across runs on one machine — if `best`

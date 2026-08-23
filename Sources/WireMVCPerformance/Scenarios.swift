@@ -66,6 +66,50 @@ struct EchoResponder: HTTPResponder {
     }
 }
 
+/// The header every "+ one response header" scenario contributes, so the three frameworks are adding the
+/// same thing by the same amount and only the mechanism differs.
+enum SharedHeader {
+    static let name = "x-wire"
+    static let value = "1"
+}
+
+/// Hummingbird's mechanism: a router middleware that sets a field on the way out.
+struct HummingbirdHeaderMiddleware<Context: RequestContext>: RouterMiddleware {
+    // `@concurrent` on both the method and `next`: this package enables
+    // `NonisolatedNonsendingByDefault` and Hummingbird does not, so without saying so the conformance is
+    // inferred with the new default and does not match the requirement's isolation.
+    @concurrent
+    func handle(
+        _ request: Request,
+        context: Context,
+        next: @concurrent (Request, Context) async throws -> Response
+    ) async throws -> Response {
+        var response = try await next(request, context)
+        response.headers[.init(SharedHeader.name)!] = SharedHeader.value
+        return response
+    }
+}
+
+/// **Hummingbird's router plus one response-header middleware.**
+///
+/// The counterpart to WireMVC's courier and registry: same capability — something upstream of the handler
+/// contributing a field to whatever head the handler writes — priced against the same framework's plain
+/// routed scenario, so what is left is the mechanism.
+struct HummingbirdHeaders: Scenario {
+    let name = "hummingbird-headers"
+    let detail = "Hummingbird route + a response-header middleware"
+
+    func run(ready: @Sendable @escaping (Int) -> Void) async throws {
+        let router = Router()
+        router.add(middleware: HummingbirdHeaderMiddleware())
+        router.get("/echo/:value") { _, context in
+            let value = context.parameters.get("value") ?? "<none>"
+            return Response(status: .ok, body: hummingbirdBody(for: value))
+        }
+        try await serveHummingbird(router: router, ready: ready)
+    }
+}
+
 /// **WireMVC through the `ServerTransport` bridge** — what Hummingbird and Vapor runtimes actually do.
 ///
 /// The request crosses into OpenAPI's currency types, then into WireMVC's, and the handler runs in an
@@ -192,6 +236,103 @@ struct ProposalNative: Scenario {
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask { try await reportPort(of: base, to: ready) }
             try await WireMVC.serve(on: server, handler: handler, services: services)
+        }
+    }
+}
+
+/// **WireMVC's router, and nothing else** — the trie served directly on the bare server, with no courier
+/// and no response-header registry.
+///
+/// This exists to make one comparison honest. `proposal-native` goes through `WireMVCContextServer`, which
+/// builds a `WireMVCContext` and a `ResponseHeaderRegistry` per request before the router is reached — so
+/// its delta prices routing *plus* a capability that `hummingbird-plain` and `vapor-plain` have no
+/// equivalent of. Comparing that against "Hummingbird's own router" charged WireMVC for something the
+/// other side was not carrying.
+///
+/// Here the scope matches: a server, a router that matches a path and binds a parameter, and a handler.
+/// Whatever separates this from `proposal-plain` is WireMVC's routing, on the same terms the other two
+/// frameworks' routers are priced on. The courier and registry are then `proposal-native` minus this.
+struct ProposalRouted: Scenario {
+    let name = "proposal-routed"
+    let detail = "WireMVC's router alone, no courier"
+
+    func run(ready: @Sendable @escaping (Int) -> Void) async throws {
+        let server = NIOHTTPServer(
+            logger: Logger(label: "perf"),
+            configuration: try .init(
+                bindTarget: .hostAndPort(host: "127.0.0.1", port: 0),
+                supportedHTTPVersions: [.http1_1],
+                transportSecurity: .plaintext
+            )
+        )
+        var builder = TrieRouteBuilder(for: server)
+        builder.register(method: .get, path: SharedRoute.path) { _, _, parameters, reader, responseSender in
+            // Same body as `EchoController`, for the same reasons — drained reader, stated length.
+            var reader = reader
+            var drained = UniqueArray<UInt8>()
+            _ = try await reader.collect(into: &drained, maximumSize: 0)
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let bytes = SharedRoute.body(for: value)
+            var fields = HTTPFields()
+            if statesContentLength { fields[.contentLength] = String(bytes.count) }
+            var body = UniqueArray<UInt8>(copying: bytes)
+            try await responseSender.sendAndFinish(
+                HTTPResponse(status: .ok, headerFields: fields),
+                buffer: &body
+            )
+        }
+        let handler = builder.finalize()
+        // The server's own `serve`, not `WireMVC.serve`: this scenario is the router by itself.
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await reportPort(of: server, to: ready) }
+            try await server.serve(handler: handler)
+        }
+    }
+}
+
+/// **WireMVC's router plus one contributed response header** — the courier's registry actually used.
+///
+/// `proposal-routed` prices the router alone and `proposal-native` adds the courier and registry unused.
+/// This is the third point: something contributes a field, and it reaches the head. That is the
+/// like-for-like against ``HummingbirdHeaders`` and ``VaporHeaders``, which do the same thing through
+/// their frameworks' middleware.
+///
+/// The sender is wrapped in `ResponseHeaderApplyingSender` by hand because this contributor registers
+/// straight onto the builder; a real `@RawRoute` gets that wrapping from codegen. Without it the
+/// contribution would be collected and never applied, which would measure half the mechanism.
+///
+/// Always length-framed, whatever `FRAMING` says: the wrapper states the length itself now, so this one
+/// scenario cannot be made chunked and should only be compared under the default.
+struct ProposalHeaders: Scenario {
+    let name = "proposal-headers"
+    let detail = "WireMVC's router + a contributed response header"
+
+    func run(ready: @Sendable @escaping (Int) -> Void) async throws {
+        let base = NIOHTTPServer(
+            logger: Logger(label: "perf"),
+            configuration: try .init(
+                bindTarget: .hostAndPort(host: "127.0.0.1", port: 0),
+                supportedHTTPVersions: [.http1_1],
+                transportSecurity: .plaintext
+            )
+        )
+        let server = WireMVCContextServer(base)
+        var builder = TrieRouteBuilder(for: server)
+        builder.register(method: .get, path: SharedRoute.path) { _, context, parameters, reader, sender in
+            var reader = reader
+            var drained = UniqueArray<UInt8>()
+            _ = try await reader.collect(into: &drained, maximumSize: 0)
+            let registry = context.responseHeaders
+            registry.add(.set(.init(SharedHeader.name)!, SharedHeader.value))
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            var body = UniqueArray<UInt8>(copying: SharedRoute.body(for: value))
+            let applying = ResponseHeaderApplyingSender(wrapping: sender, registry: registry)
+            try await applying.sendAndFinish(HTTPResponse(status: .ok), buffer: &body)
+        }
+        let handler = builder.finalize()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await reportPort(of: base, to: ready) }
+            try await base.serve(handler: WireMVCContextHandler(inner: handler))
         }
     }
 }

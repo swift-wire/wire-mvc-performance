@@ -114,6 +114,10 @@ func driveCourier(warmup: Int, iterations: Int) async throws -> [Double] {
     return samples
 }
 
+/// A field name built once, so a case that uses it is not also measuring `HTTPField.Name`'s validation of
+/// the string on every request.
+let staticHeaderName = HTTPField.Name(SharedHeader.name)!
+
 /// One in-process case: a name, and a router built from a route registered some particular way.
 struct InProcessCase: Sendable {
     let name: String
@@ -227,6 +231,166 @@ let inProcessCases: [InProcessCase] = [
             let fields = WireMVCResponseHeaders.resolved(middleware: try await registry.drain())
             try await WireMVCOutcome(status: .ok, headerFields: fields, body: SharedRoute.body(for: value))
                 .send(on: responseSender)
+        }
+    },
+    // The registry's own two calls, bisected. `add` is variadic, so each call builds an Array for the
+    // parameter, wraps it in a `.values` case and appends that to `registrations`; `drain` then builds a
+    // third array to collect into. These separate allocating the registry, registering into it, and
+    // draining it — with `withExtendedLifetime` so a registry that is never read is not optimised away.
+    InProcessCase(
+        name: "+reg-alloc",
+        detail: "a registry allocated and never used"
+    ) {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let registry = ResponseHeaderRegistry()
+            try await WireMVCOutcome(status: .ok, body: SharedRoute.body(for: value))
+                .send(on: responseSender)
+            // Synchronous, and after the send: `withExtendedLifetime` takes no async closure, and the
+            // point is only to stop a registry nothing reads from being optimised away.
+            withExtendedLifetime(registry) {}
+        }
+    },
+    InProcessCase(
+        name: "+reg-add",
+        detail: "one contribution registered, never drained"
+    ) {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let registry = ResponseHeaderRegistry()
+            registry.add(.set(staticHeaderName, SharedHeader.value))
+            try await WireMVCOutcome(status: .ok, body: SharedRoute.body(for: value))
+                .send(on: responseSender)
+            // Synchronous, and after the send: `withExtendedLifetime` takes no async closure, and the
+            // point is only to stop a registry nothing reads from being optimised away.
+            withExtendedLifetime(registry) {}
+        }
+    },
+    // Drain with one contribution, discarding it: `add` + the `async` drain, without resolving.
+    InProcessCase(
+        name: "+drain-only",
+        detail: "one contribution, drained and discarded"
+    ) {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let registry = ResponseHeaderRegistry()
+            registry.add(.set(staticHeaderName, SharedHeader.value))
+            _ = try await registry.drain()
+            try await WireMVCOutcome(status: .ok, body: SharedRoute.body(for: value))
+                .send(on: responseSender)
+        }
+    },
+    // The same, now resolving the drained contribution into fields. The field name is a **static** here;
+    // the next case builds it per request, which is the difference between the two.
+    InProcessCase(
+        name: "+resolve",
+        detail: "the contribution resolved into fields, static field name"
+    ) {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let registry = ResponseHeaderRegistry()
+            registry.add(.set(staticHeaderName, SharedHeader.value))
+            let fields = WireMVCResponseHeaders.resolved(middleware: try await registry.drain())
+            try await WireMVCOutcome(status: .ok, headerFields: fields, body: SharedRoute.body(for: value))
+                .send(on: responseSender)
+        }
+    },
+    // The same resolution, but writing each contribution with the **scalar** subscript instead of the
+    // array-valued one. `WireMVCResponseHeaders.apply` spells a `.set` as `fields[values: name] = [value]`,
+    // which builds an `Array` for a single value; `.setIfAbsent` builds one just to ask `.isEmpty`. If that
+    // is where the resolve cost is, this case is cheaper by exactly that much.
+    InProcessCase(
+        name: "+resolve-scalar",
+        detail: "the same resolution via the scalar HTTPFields subscript"
+    ) {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let registry = ResponseHeaderRegistry()
+            registry.add(.set(staticHeaderName, SharedHeader.value))
+            var fields = HTTPFields()
+            for contribution in try await registry.drain() {
+                switch contribution {
+                case let .set(name, value): fields[name] = value
+                case let .append(name, value): fields.append(HTTPField(name: name, value: value))
+                case let .setIfAbsent(name, value): if fields[name] == nil { fields[name] = value }
+                }
+            }
+            try await WireMVCOutcome(status: .ok, headerFields: fields, body: SharedRoute.body(for: value))
+                .send(on: responseSender)
+        }
+    },
+    // `WireMVCResponseHeaders.apply` directly, without `resolved`'s wrapper around it. Sits between
+    // `+resolve` (the wrapper) and `+resolve-scalar` (a hand-rolled switch), so the two gaps separate what
+    // `apply` costs from what the wrapper costs.
+    InProcessCase(
+        name: "+apply-direct",
+        detail: "the library's apply, without resolved's wrapper"
+    ) {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let registry = ResponseHeaderRegistry()
+            registry.add(.set(staticHeaderName, SharedHeader.value))
+            var fields = HTTPFields()
+            for contribution in try await registry.drain() {
+                WireMVCResponseHeaders.apply(contribution, to: &fields)
+            }
+            try await WireMVCOutcome(status: .ok, headerFields: fields, body: SharedRoute.body(for: value))
+                .send(on: responseSender)
+        }
+    },
+    // The same, with a handler that writes **its own header fields** — a content type and a length, as any
+    // real raw route does. `+applying` writes a bare `HTTPResponse(status:)`, so it never exercises the
+    // path where the handler's fields have to survive alongside the contributions. That is the case where
+    // building a fresh `HTTPFields` and replaying the handler's fields into it costs something.
+    InProcessCase(
+        name: "+applying-fields",
+        detail: "the applying sender, handler writing its own fields"
+    ) {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let registry = ResponseHeaderRegistry()
+            registry.add(.set(staticHeaderName, SharedHeader.value))
+            let bytes = SharedRoute.body(for: value)
+            var fields = HTTPFields()
+            fields[.contentType] = "text/plain"
+            fields[.contentLength] = String(bytes.count)
+            var body = UniqueArray<UInt8>(copying: bytes)
+            let applying = ResponseHeaderApplyingSender(wrapping: responseSender, registry: registry)
+            try await applying.sendAndFinish(
+                HTTPResponse(status: .ok, headerFields: fields),
+                buffer: &body
+            )
+        }
+    },
+    // The registry *used*, bisected. Socketed, contributing one header measured ~3 µs above not
+    // contributing — but the socketed proposal baseline carries ~2.5 µs of jitter, so that number could
+    // be almost entirely measurement. These two cases sit at ~0.05 µs resolution and say which.
+    InProcessCase(
+        name: "+contribution",
+        detail: "one header contributed, drained and resolved"
+    ) {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let registry = ResponseHeaderRegistry()
+            registry.add(.set(.init(SharedHeader.name)!, SharedHeader.value))
+            let fields = WireMVCResponseHeaders.resolved(middleware: try await registry.drain())
+            try await WireMVCOutcome(status: .ok, headerFields: fields, body: SharedRoute.body(for: value))
+                .send(on: responseSender)
+        }
+    },
+    // The whole mechanism as a raw route meets it: the applying sender, its deferred head, and the fused
+    // send — `+contribution` minus this is the wrapper's own cost.
+    InProcessCase(
+        name: "+applying",
+        detail: "the same, through ResponseHeaderApplyingSender"
+    ) {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let registry = ResponseHeaderRegistry()
+            registry.add(.set(.init(SharedHeader.name)!, SharedHeader.value))
+            var body = UniqueArray<UInt8>(copying: SharedRoute.body(for: value))
+            let applying = ResponseHeaderApplyingSender(wrapping: responseSender, registry: registry)
+            try await applying.sendAndFinish(HTTPResponse(status: .ok), buffer: &body)
         }
     },
 ]

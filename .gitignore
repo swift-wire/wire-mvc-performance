@@ -3,3 +3,7 @@
 Package.resolved
 *.xcodeproj
 .DS_Store
+
+# `swift package edit wire-mvc --path ../wire-mvc` puts a symlink here. Local to whoever is
+# iterating on the library; never committed, and a checkout without it resolves wire-mvc from git.
+Packages/

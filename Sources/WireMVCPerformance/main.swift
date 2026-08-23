@@ -14,12 +14,16 @@ import NIOHTTP1
 
 let warmup = ProcessInfo.processInfo.environment["WARMUP"].flatMap(Int.init) ?? 2_000
 let iterations = ProcessInfo.processInfo.environment["ITERATIONS"].flatMap(Int.init) ?? 20_000
-let rounds = ProcessInfo.processInfo.environment["ROUNDS"].flatMap(Int.init) ?? 3
+// Rounds matter more under the isolated driver than they did under the interleaved one: each round is a
+// fresh visit to every scenario in a fresh order, so rounds are what average drift out. Six rather than
+// three measurably tightens the control (`proposal-plain` against `proposal-plain-served`, which differ in
+// nothing that should cost anything) without changing total work — `iterations` is split across them.
+let rounds = ProcessInfo.processInfo.environment["ROUNDS"].flatMap(Int.init) ?? 6
 
 let all: [any Scenario] = [
-    HummingbirdRaw(), HummingbirdPlain(), HummingbirdBridged(),
-    VaporRaw(), VaporPlain(), VaporBridged(),
-    ProposalPlain(), ProposalPlainServed(), ProposalNative(),
+    HummingbirdRaw(), HummingbirdPlain(), HummingbirdHeaders(), HummingbirdBridged(),
+    VaporRaw(), VaporPlain(), VaporHeaders(), VaporHeadersTwice(), VaporHeadersFuture(), VaporBridged(),
+    ProposalPlain(), ProposalPlainServed(), ProposalRouted(), ProposalHeaders(), ProposalNative(),
 ]
 // `SCENARIOS=proposal-plain,proposal-native` runs a subset — for isolating one stack while iterating.
 let selected = ProcessInfo.processInfo.environment["SCENARIOS"]?.split(separator: ",").map(String.init)
@@ -210,29 +214,82 @@ if ProcessInfo.processInfo.environment["SKIP_INPROCESS"] == nil {
 var configuration = HTTPClient.Configuration()
 configuration.httpVersion = .http1Only
 let client = HTTPClient(eventLoopGroupProvider: .singleton, configuration: configuration)
-/// Drive every scenario **round-robin** from one loop, with all their servers already running.
+/// Drive each scenario **alone**, in short rounds, visiting them in a different order each round.
 ///
-/// Sequential measurement gives each scenario its own slice of wall-clock, so anything drifting on the
-/// machine — thermal state, another process, the page cache — lands on whichever scenario was running at
-/// the time and is then reported as that scenario's cost. Interleaving draws every scenario's samples from
-/// the same windows, so drift hits them all and cancels in the comparison.
+/// Two problems have to be solved at once, and the obvious answers each solve one and cause the other.
 ///
-/// This is what the earlier "+20 µs at p99 for WireMVC" turned out to be, and the in-process pass is what
-/// exposed it. `SEQUENTIAL=1` runs the old way, for reproducing the artefact rather than avoiding it.
-func measureInterleaved(_ scenarios: [any Scenario], client: HTTPClient) async throws -> [Measurement] {
-    var measurements = scenarios.map { Measurement(scenario: $0.name, detail: $0.detail) }
+/// *Sequential* measurement — run A to completion, then B — gives each scenario its own slice of
+/// wall-clock, so anything drifting on the machine lands on whichever scenario was running at the time and
+/// is reported as that scenario's cost. That is what the earlier "+20 µs at p99 for WireMVC" turned out to
+/// be, and it is why this harness stopped doing it.
+///
+/// *Fixed-order interleaving* — all servers up, one request each per pass — fixes drift but introduces two
+/// artefacts of its own, both measured:
+///
+/// - **Position bias.** A request issued straight after a request to a slow server is itself slower. With
+///   a fixed ring each scenario has a fixed predecessor, so the handicap is permanent: `proposal-plain`
+///   sat behind `vapor-bridged` (~124 µs) and read 2.6–3.7 µs above `proposal-plain-served`, while the two
+///   are *identical* when run as a pair. Reproducible across a dozen runs, which makes it look like signal.
+///   Rotating the ring does not help — rotation preserves the cycle, so the predecessor is unchanged.
+/// - **Crowding.** Fifteen servers alive at once contend for threads, event loops and cache. The same two
+///   scenarios measure ~76.7 µs as a pair and ~80–83 µs in a fifteen-scenario ring, so every number is
+///   inflated before any comparison begins.
+///
+/// So: **one server alive at a time** (no crowding, no predecessor), in **many short rounds** (drift is
+/// spread across every scenario rather than accumulating in whichever ran last), visited in a **shuffled**
+/// order each round (no residual position effect). Startup is a few milliseconds against ~1.6 s of
+/// measurement per scenario per round, and it happens before timing starts, so it does not enter the
+/// samples.
+///
+/// `SEQUENTIAL=1` runs one long slice per scenario, for reproducing the drift artefact rather than
+/// avoiding it.
+func measureIsolated(_ scenarios: [any Scenario], client: HTTPClient) async throws -> [Measurement] {
+    var byName: [String: Measurement] = [:]
+    for scenario in scenarios {
+        byName[scenario.name] = Measurement(scenario: scenario.name, detail: scenario.detail)
+    }
+    // Each round measures `iterations / rounds` requests per scenario, so total work matches what the
+    // interleaved driver did and `ITERATIONS`/`ROUNDS` keep their meanings.
+    let perRound = max(1, iterations / max(1, rounds))
+    var order = scenarios.map(\.name)
 
-    return try await withThrowingTaskGroup(of: Void.self) { group in
-        var urls: [String] = []
-        for scenario in scenarios {
-            let port = AsyncStream<Int>.makeStream()
-            group.addTask { try? await scenario.run { port.continuation.yield($0) } }
-            var iterator = port.stream.makeAsyncIterator()
-            guard let bound = await iterator.next() else { throw HarnessError.serverNeverBound }
-            urls.append("http://127.0.0.1:\(bound)/echo/benchmark")
+    for round in 0..<rounds {
+        // Shuffled, not rotated. A rotation leaves every scenario with the same predecessor it had.
+        order.shuffle()
+        for name in order {
+            guard let scenario = scenarios.first(where: { $0.name == name }) else { continue }
+            let samples = try await measureAlone(
+                scenario,
+                client: client,
+                warmup: round == 0 ? warmup : warmup / 4,
+                count: perRound
+            )
+            byName[name]?.samples.append(contentsOf: samples)
         }
+    }
+    return scenarios.compactMap { byName[$0.name] }
+}
 
-        func hit(_ url: String) async throws -> Double {
+/// Start one scenario, drive it, and stop it — nothing else is running while it is measured.
+func measureAlone(
+    _ scenario: any Scenario,
+    client: HTTPClient,
+    warmup: Int,
+    count: Int
+) async throws -> [Double] {
+    let port = AsyncStream<Int>.makeStream()
+    return try await withThrowingTaskGroup(of: [Double].self) { group in
+        group.addTask {
+            // Swallowed on purpose: this task is cancelled once the round is measured, and both servers
+            // surface that as a thrown error which would otherwise end the run.
+            try? await scenario.run { port.continuation.yield($0) }
+            return []
+        }
+        var iterator = port.stream.makeAsyncIterator()
+        guard let bound = await iterator.next() else { throw HarnessError.serverNeverBound }
+        let url = "http://127.0.0.1:\(bound)/echo/benchmark"
+
+        func hit() async throws -> Double {
             var request = HTTPClientRequest(url: url)
             request.headers.add(name: "connection", value: "keep-alive")
             let start = ContinuousClock.now
@@ -244,19 +301,13 @@ func measureInterleaved(_ scenarios: [any Scenario], client: HTTPClient) async t
             return micros(since: start)
         }
 
-        for _ in 0..<warmup {
-            for url in urls { _ = try await hit(url) }
-        }
-        for _ in 0..<(iterations * rounds) {
-            // One pass of the ring per iteration, so consecutive samples of different scenarios are
-            // microseconds apart rather than minutes.
-            for (index, url) in urls.enumerated() {
-                measurements[index].samples.append(try await hit(url))
-            }
-        }
+        for _ in 0..<warmup { _ = try await hit() }
+        var samples: [Double] = []
+        samples.reserveCapacity(count)
+        for _ in 0..<count { samples.append(try await hit()) }
 
         group.cancelAll()
-        return measurements
+        return samples
     }
 }
 
@@ -271,7 +322,7 @@ if ProcessInfo.processInfo.environment["SEQUENTIAL"] != nil {
         }
     }
 } else if !scenarios.isEmpty {
-    results = try await measureInterleaved(scenarios, client: client)
+    results = try await measureIsolated(scenarios, client: client)
 }
 try await client.shutdown()
 
@@ -279,8 +330,8 @@ try await client.shutdown()
 // so nothing makes a request artificially fast — and the tail is where work that is *usually* cheap but
 // occasionally not, such as an allocation that triggers a growth, shows itself.
 print("")
-let order = ProcessInfo.processInfo.environment["SEQUENTIAL"] != nil ? "sequential" : "interleaved"
-print("iterations: \(iterations) per round, \(rounds) rounds, \(warmup) warmup, \(order)")
+let order = ProcessInfo.processInfo.environment["SEQUENTIAL"] != nil ? "sequential" : "isolated, shuffled rounds"
+print("iterations: \(iterations) per scenario, \(rounds) rounds, \(warmup) warmup, \(order)")
 print("")
 print("scenario                  min      p50      p90      p99      max     mean")
 for result in results {
@@ -322,10 +373,33 @@ print("what each router costs (routed − routerless, same framework)")
 for (label, routed, raw) in [
     ("Hummingbird's own router     ", "hummingbird-plain", "hummingbird-raw"),
     ("Vapor's own router           ", "vapor-plain", "vapor-raw"),
+    ("WireMVC's router alone       ", "proposal-routed", "proposal-plain"),
     ("WireMVC.serve vs server.serve", "proposal-plain-served", "proposal-plain"),
     ("WireMVC's handler, same serve", "proposal-native", "proposal-plain-served"),
+    ("the courier + registry       ", "proposal-native", "proposal-routed"),
 ] {
     guard let a = byName[routed], let b = byName[raw] else { continue }
+    print(
+        String(
+            format: "  %@ min %+7.2f   p50 %+7.2f   p99 %+8.2f µs",
+            label,
+            a.minimum - b.minimum,
+            a.percentile(50) - b.percentile(50),
+            a.percentile(99) - b.percentile(99)
+        )
+    )
+}
+
+print("")
+print("one contributed response header (headers − the same framework's plain routed scenario)")
+for (label, withHeader, without) in [
+    ("Hummingbird middleware       ", "hummingbird-headers", "hummingbird-plain"),
+    ("Vapor middleware             ", "vapor-headers", "vapor-plain"),
+    ("WireMVC registry + applying  ", "proposal-headers", "proposal-routed"),
+    ("Vapor's *second* middleware  ", "vapor-headers-2", "vapor-headers"),
+    ("Vapor, future-based instead  ", "vapor-headers-future", "vapor-plain"),
+] {
+    guard let a = byName[withHeader], let b = byName[without] else { continue }
     print(
         String(
             format: "  %@ min %+7.2f   p50 %+7.2f   p99 %+8.2f µs",

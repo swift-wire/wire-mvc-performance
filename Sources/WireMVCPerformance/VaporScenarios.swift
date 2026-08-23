@@ -104,3 +104,88 @@ func vaporBody(for value: String) -> Response.Body {
     }
     return .init(buffer: buffer)
 }
+
+/// Vapor's mechanism: an `AsyncMiddleware` that sets a field on the way out.
+struct VaporHeaderMiddleware: AsyncMiddleware {
+    func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
+        let response = try await next.respond(to: request)
+        response.headers.replaceOrAdd(name: SharedHeader.name, value: SharedHeader.value)
+        return response
+    }
+}
+
+/// **Vapor's router plus one response-header middleware.** See ``HummingbirdHeaders``.
+struct VaporHeaders: Scenario {
+    let name = "vapor-headers"
+    let detail = "Vapor route + a response-header middleware"
+
+    func run(ready: @Sendable @escaping (Int) -> Void) async throws {
+        try await serveVapor(ready: ready) { app in
+            app.middleware.use(VaporHeaderMiddleware())
+            app.get("echo", ":value") { request in
+                let value = request.parameters.get("value") ?? "<none>"
+                return Response(status: .ok, body: vaporBody(for: value))
+            }
+        }
+    }
+}
+
+/// **Vapor with two response-header middlewares**, to tell a per-middleware cost from a one-off.
+///
+/// `vapor-headers` costs far more than Hummingbird's equivalent, which has two possible shapes: every
+/// middleware is expensive, or the *first* one is, because it is what pulls the request onto the
+/// middleware-responder path at all. Subtracting this from `vapor-headers` says which.
+struct VaporHeadersTwice: Scenario {
+    let name = "vapor-headers-2"
+    let detail = "Vapor route + two response-header middlewares"
+
+    func run(ready: @Sendable @escaping (Int) -> Void) async throws {
+        try await serveVapor(ready: ready) { app in
+            app.middleware.use(VaporHeaderMiddleware())
+            app.middleware.use(SecondVaporHeaderMiddleware())
+            app.get("echo", ":value") { request in
+                let value = request.parameters.get("value") ?? "<none>"
+                return Response(status: .ok, body: vaporBody(for: value))
+            }
+        }
+    }
+}
+
+/// A second, distinct field so the two middlewares cannot be collapsed.
+struct SecondVaporHeaderMiddleware: AsyncMiddleware {
+    func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
+        let response = try await next.respond(to: request)
+        response.headers.replaceOrAdd(name: "x-wire-2", value: SharedHeader.value)
+        return response
+    }
+}
+
+/// Vapor's **native** middleware form: future-based, no `async` bridging.
+///
+/// `AsyncMiddleware` is a shim over this, and the shim is where a future↔async hop per middleware would
+/// live. Measuring both separates "Vapor's middleware costs this" from "bridging Vapor's middleware into
+/// `async` costs this" — a distinction worth making before quoting a number at Vapor.
+struct VaporFutureHeaderMiddleware: Middleware {
+    func respond(to request: Request, chainingTo next: any Responder) -> EventLoopFuture<Response> {
+        next.respond(to: request).map { response in
+            response.headers.replaceOrAdd(name: SharedHeader.name, value: SharedHeader.value)
+            return response
+        }
+    }
+}
+
+/// **Vapor with one future-based response-header middleware.** See ``VaporFutureHeaderMiddleware``.
+struct VaporHeadersFuture: Scenario {
+    let name = "vapor-headers-future"
+    let detail = "Vapor route + a future-based header middleware"
+
+    func run(ready: @Sendable @escaping (Int) -> Void) async throws {
+        try await serveVapor(ready: ready) { app in
+            app.middleware.use(VaporFutureHeaderMiddleware())
+            app.get("echo", ":value") { request in
+                let value = request.parameters.get("value") ?? "<none>"
+                return Response(status: .ok, body: vaporBody(for: value))
+            }
+        }
+    }
+}
