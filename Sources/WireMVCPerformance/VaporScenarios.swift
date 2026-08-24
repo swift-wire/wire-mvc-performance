@@ -3,6 +3,8 @@ import NIOCore
 import OpenAPIVapor
 import ServiceLifecycle
 import Vapor
+import WireMVC
+import WireMVCVaporNative
 import WireMVCServerTransport
 
 // Vapor's scenarios live in their own file: Hummingbird and Vapor both define `Application`, `Request`
@@ -165,7 +167,7 @@ struct SecondVaporHeaderMiddleware: AsyncMiddleware {
 /// `AsyncMiddleware` is a shim over this, and the shim is where a future↔async hop per middleware would
 /// live. Measuring both separates "Vapor's middleware costs this" from "bridging Vapor's middleware into
 /// `async` costs this" — a distinction worth making before quoting a number at Vapor.
-struct VaporFutureHeaderMiddleware: Middleware {
+struct VaporFutureHeaderMiddleware: Vapor.Middleware {
     func respond(to request: Request, chainingTo next: any Responder) -> EventLoopFuture<Response> {
         next.respond(to: request).map { response in
             response.headers.replaceOrAdd(name: SharedHeader.name, value: SharedHeader.value)
@@ -183,6 +185,92 @@ struct VaporHeadersFuture: Scenario {
         try await serveVapor(ready: ready) { app in
             app.middleware.use(VaporFutureHeaderMiddleware())
             app.get("echo", ":value") { request in
+                let value = request.parameters.get("value") ?? "<none>"
+                return Response(status: .ok, body: vaporBody(for: value))
+            }
+        }
+    }
+}
+
+/// The Vapor payload — `Content` is Vapor's typed-response protocol, the counterpart to Hummingbird's
+/// `ResponseCodable` and WireMVC's `@JSONResponse`.
+struct VaporEchoPayload: Content {
+    let value: String
+}
+
+/// **A Vapor typed route**: binds a path parameter, reads the body, returns `Content`. See
+/// ``HummingbirdTyped`` for why the body read is there.
+struct VaporTyped: Scenario {
+    let name = "vapor-typed"
+    let detail = "Vapor route returning Content, body collected"
+
+    func run(ready: @Sendable @escaping (Int) -> Void) async throws {
+        try await serveVapor(ready: ready) { app in
+            app.get("echo", ":value") { request async throws -> VaporEchoPayload in
+                _ = request.body.data
+                let value = request.parameters.get("value") ?? "<none>"
+                return VaporEchoPayload(value: value)
+            }
+        }
+    }
+}
+
+/// **The native Vapor adapter**, against the `ServerTransport` bridge serving the same graph.
+///
+/// Vapor's bridge costs +40 µs and 105 allocations over `vapor-plain` — more than twice Hummingbird's —
+/// so this is where the shape argument is worth most, if it holds on this runtime too.
+struct VaporNative: Scenario {
+    let name = "vapor-native"
+    let detail = "WireMVC mounted directly on Vapor's router"
+
+    func run(ready: @Sendable @escaping (Int) -> Void) async throws {
+        try await serveVapor(ready: ready) { app in
+            var builder = WireMVCVaporRouteBuilder(application: app)
+            _ = try? WireMVC.apply(EchoGraph(), to: &builder)
+        }
+    }
+}
+
+/// **Vapor's floor, but `async`** — the same work as ``EchoVaporResponder``, reached through
+/// `AsyncResponder` instead of returning a succeeded future.
+///
+/// `vapor-raw` is the lowest floor measured here, and it is the only floor scenario that never enters
+/// `async` at all: it builds a `Response` synchronously and hands back `makeSucceededFuture`. Hummingbird's
+/// and the proposal server's floors are both `async` handlers. So "Vapor's server is faster" and "Vapor's
+/// floor skips a hop the others pay" predict the same ordering, and only this separates them.
+struct VaporRawAsync: Scenario {
+    let name = "vapor-raw-async"
+    let detail = "Vapor server, no router, async responder"
+
+    func run(ready: @Sendable @escaping (Int) -> Void) async throws {
+        try await serveVapor(ready: ready) { app in
+            app.responder.use { _ in EchoVaporAsyncResponder() }
+        }
+    }
+}
+
+struct EchoVaporAsyncResponder: AsyncResponder {
+    func respond(to request: Request) async throws -> Response {
+        let value = request.url.path.split(separator: "/").dropFirst().first.map(String.init) ?? "<none>"
+        return Response(status: .ok, body: vaporBody(for: value))
+    }
+}
+
+/// **A routed `async` closure returning a plain `Response`** — between `vapor-raw-async` and `vapor-typed`.
+///
+/// `vapor-raw-async` replaces the responder chain with an `AsyncResponder`; `vapor-typed` is a *routed*
+/// `async` closure that also encodes `Content`. Those differ in two ways at once, so the gap between them
+/// cannot be attributed. This sits in the middle: routed, `async`, no content encoding. So
+/// `this − vapor-raw-async` is the router plus whatever Vapor does to host an async route closure, and
+/// `vapor-typed − this` is the `Content` machinery on its own.
+struct VaporRoutedAsync: Scenario {
+    let name = "vapor-routed-async"
+    let detail = "Vapor routed async closure, plain Response"
+
+    func run(ready: @Sendable @escaping (Int) -> Void) async throws {
+        try await serveVapor(ready: ready) { app in
+            app.get("echo", ":value") { request async throws -> Response in
+                _ = request.body.data
                 let value = request.parameters.get("value") ?? "<none>"
                 return Response(status: .ok, body: vaporBody(for: value))
             }

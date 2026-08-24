@@ -17,8 +17,15 @@ import WireMVCServerTransport
 protocol Scenario: Sendable {
     var name: String { get }
     var detail: String { get }
+    /// The path to drive. Defaulted, because every scenario but the codegen'd pair serves the same route —
+    /// and those two differ only in which of one graph's two routes is hit.
+    var path: String { get }
     /// Run until cancelled, calling `ready` with the bound port once serving.
     func run(ready: @Sendable @escaping (Int) -> Void) async throws
+}
+
+extension Scenario {
+    var path: String { "/echo/benchmark" }
 }
 
 /// **The floor.** A plain Hummingbird route touching no WireMVC machinery.
@@ -87,6 +94,33 @@ struct HummingbirdHeaderMiddleware<Context: RequestContext>: RouterMiddleware {
         var response = try await next(request, context)
         response.headers[.init(SharedHeader.name)!] = SharedHeader.value
         return response
+    }
+}
+
+/// The payload the typed scenarios answer with — the same shape `PerformanceControllers.Echo` uses, so
+/// the three frameworks encode the same object.
+struct EchoPayload: ResponseCodable {
+    let value: String
+}
+
+/// **A Hummingbird typed route**: binds a path parameter, reads the body, returns a `Codable`.
+///
+/// The counterpart to `codegen-app-scoped`. `hummingbird-plain` writes raw bytes and reads nothing, so it
+/// cannot be compared against a WireMVC controller that encodes JSON and collects the request — this can.
+/// The body read is deliberate: WireMVC's generated terminal collects it, so leaving it out here would
+/// price a different amount of work on each side.
+struct HummingbirdTyped: Scenario {
+    let name = "hummingbird-typed"
+    let detail = "Hummingbird route returning Codable, body collected"
+
+    func run(ready: @Sendable @escaping (Int) -> Void) async throws {
+        let router = Router()
+        router.get("/echo/:value") { request, context in
+            _ = try await request.body.collect(upTo: 1024)
+            let value = context.parameters.get("value") ?? "<none>"
+            return EchoPayload(value: value)
+        }
+        try await serveHummingbird(router: router, ready: ready)
     }
 }
 
@@ -290,6 +324,97 @@ struct ProposalRouted: Scenario {
     }
 }
 
+/// **No wrapper, but the base sender's three-argument `sendAndFinish`.**
+///
+/// The wrapper changes which path the *base* takes. A bare `sendAndFinish(response, buffer:)` is the
+/// two-argument spelling, which binds to the proposal's extension and expands to `send` + `finish`. Through
+/// the wrapper the base is instead handed the three-argument witness, fused. If those two paths differ in
+/// the server, the difference is the server's and not the wrapper's — this says which.
+struct ProposalFused: Scenario {
+    let name = "proposal-fused"
+    let detail = "no wrapper, explicit three-argument sendAndFinish"
+
+    func run(ready: @Sendable @escaping (Int) -> Void) async throws {
+        let server = NIOHTTPServer(
+            logger: Logger(label: "perf"),
+            configuration: try .init(
+                bindTarget: .hostAndPort(host: "127.0.0.1", port: 0),
+                supportedHTTPVersions: [.http1_1],
+                transportSecurity: .plaintext
+            )
+        )
+        var builder = TrieRouteBuilder(for: server)
+        builder.register(method: .get, path: SharedRoute.path) { _, _, parameters, reader, responseSender in
+            var reader = reader
+            var drained = UniqueArray<UInt8>()
+            _ = try await reader.collect(into: &drained, maximumSize: 0)
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let bytes = SharedRoute.body(for: value)
+            var fields = HTTPFields()
+            fields[.contentLength] = String(bytes.count)
+            var body = UniqueArray<UInt8>(copying: bytes)
+            // The three-argument spelling, explicitly — this reaches the conformer's witness where the
+            // two-argument one cannot.
+            try await responseSender.sendAndFinish(
+                HTTPResponse(status: .ok, headerFields: fields),
+                buffer: &body,
+                trailer: nil
+            )
+        }
+        let handler = builder.finalize()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await reportPort(of: server, to: ready) }
+            try await server.serve(handler: handler)
+        }
+    }
+}
+
+/// **The applying sender, wrapping, with nothing contributed.**
+///
+/// Sits between `proposal-native` (courier and registry, no wrapper) and `proposal-headers` (wrapper and a
+/// contribution), so the two gaps separate what the wrapper and its deferred head cost from what
+/// registering, draining and applying a contribution costs. Without it the whole mechanism is one number.
+struct ProposalWrapped: Scenario {
+    let name = "proposal-wrapped"
+    let detail = "WireMVC's router + the applying sender, nothing contributed"
+
+    func run(ready: @Sendable @escaping (Int) -> Void) async throws {
+        let base = NIOHTTPServer(
+            logger: Logger(label: "perf"),
+            configuration: try .init(
+                bindTarget: .hostAndPort(host: "127.0.0.1", port: 0),
+                supportedHTTPVersions: [.http1_1],
+                transportSecurity: .plaintext
+            )
+        )
+        let server = WireMVCContextServer(base)
+        var builder = TrieRouteBuilder(for: server)
+        builder.register(method: .get, path: SharedRoute.path) { _, context, parameters, reader, sender in
+            var reader = reader
+            var drained = UniqueArray<UInt8>()
+            _ = try await reader.collect(into: &drained, maximumSize: 0)
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let bytes = SharedRoute.body(for: value)
+            // The handler states its own length, so the wrapper's `stateLengthIfAbsent` is a no-op and
+            // this scenario isolates the wrapper's *machinery* from the header insertion it would
+            // otherwise perform — an insertion the unwrapped scenarios do in their handler instead.
+            var fields = HTTPFields()
+            fields[.contentLength] = String(bytes.count)
+            var body = UniqueArray<UInt8>(copying: bytes)
+            let applying = ResponseHeaderApplyingSender(wrapping: sender, registry: context.responseHeaders)
+            try await applying.sendAndFinish(
+                HTTPResponse(status: .ok, headerFields: fields),
+                buffer: &body
+            )
+        }
+        let handler = builder.finalize()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await reportPort(of: base, to: ready) }
+            try await base.serve(handler: WireMVCContextHandler(inner: handler))
+        }
+    }
+}
+
 /// **WireMVC's router plus one contributed response header** — the courier's registry actually used.
 ///
 /// `proposal-routed` prices the router alone and `proposal-native` adds the courier and registry unused.
@@ -325,9 +450,18 @@ struct ProposalHeaders: Scenario {
             let registry = context.responseHeaders
             registry.add(.set(.init(SharedHeader.name)!, SharedHeader.value))
             let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
-            var body = UniqueArray<UInt8>(copying: SharedRoute.body(for: value))
+            let bytes = SharedRoute.body(for: value)
+            // States its own length, exactly as `proposal-wrapped` does, so the two differ **only** by the
+            // contribution. Leaving it to the wrapper would put a `Content-Length` insertion in this
+            // scenario's column and none in the other's, and the marginal would price both at once.
+            var fields = HTTPFields()
+            fields[.contentLength] = String(bytes.count)
+            var body = UniqueArray<UInt8>(copying: bytes)
             let applying = ResponseHeaderApplyingSender(wrapping: sender, registry: registry)
-            try await applying.sendAndFinish(HTTPResponse(status: .ok), buffer: &body)
+            try await applying.sendAndFinish(
+                HTTPResponse(status: .ok, headerFields: fields),
+                buffer: &body
+            )
         }
         let handler = builder.finalize()
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -338,7 +472,7 @@ struct ProposalHeaders: Scenario {
 }
 
 /// Await the proposal server's bound address and report its port.
-private func reportPort(
+func reportPort(
     of server: NIOHTTPServer,
     to ready: @Sendable @escaping (Int) -> Void
 ) async throws {
@@ -347,7 +481,7 @@ private func reportPort(
 }
 
 /// Serve a Hummingbird router on an ephemeral port, reporting it once bound.
-private func serveHummingbird(
+func serveHummingbird(
     router: Router<BasicRequestContext>,
     ready: @Sendable @escaping (Int) -> Void
 ) async throws {

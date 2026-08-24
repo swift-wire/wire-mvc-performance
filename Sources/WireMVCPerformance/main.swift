@@ -21,9 +21,20 @@ let iterations = ProcessInfo.processInfo.environment["ITERATIONS"].flatMap(Int.i
 let rounds = ProcessInfo.processInfo.environment["ROUNDS"].flatMap(Int.init) ?? 6
 
 let all: [any Scenario] = [
-    HummingbirdRaw(), HummingbirdPlain(), HummingbirdHeaders(), HummingbirdBridged(),
-    VaporRaw(), VaporPlain(), VaporHeaders(), VaporHeadersTwice(), VaporHeadersFuture(), VaporBridged(),
-    ProposalPlain(), ProposalPlainServed(), ProposalRouted(), ProposalHeaders(), ProposalNative(),
+    HummingbirdRaw(), HummingbirdPlain(), HummingbirdHeaders(), HummingbirdTyped(), HummingbirdNative(), HummingbirdBridged(),
+    VaporRaw(), VaporRawAsync(), VaporRoutedAsync(), VaporPlain(), VaporHeaders(), VaporHeadersTwice(), VaporHeadersFuture(), VaporTyped(), VaporNative(), VaporBridged(),
+    ProposalPlain(), ProposalPlainServed(), ProposalRouted(), ProposalFused(),
+    ProposalWrapped(), ProposalHeaders(), ProposalNative(),
+    ScopedControllerScenario(
+        name: "codegen-app-scoped",
+        detail: "a codegen'd @Controller, one instance for the process",
+        path: "/app/benchmark"
+    ),
+    ScopedControllerScenario(
+        name: "codegen-request-scoped",
+        detail: "a codegen'd @Scoped(seed:) @Controller, entered per request",
+        path: "/scoped/benchmark"
+    ),
 ]
 // `SCENARIOS=proposal-plain,proposal-native` runs a subset — for isolating one stack while iterating.
 let selected = ProcessInfo.processInfo.environment["SCENARIOS"]?.split(separator: ",").map(String.init)
@@ -69,7 +80,7 @@ func measure(_ scenario: any Scenario, client: HTTPClient) async throws -> Measu
         var iterator = port.stream.makeAsyncIterator()
         guard let boundPort = await iterator.next() else { throw HarnessError.serverNeverBound }
 
-        let url = "http://127.0.0.1:\(boundPort)/echo/benchmark"
+        let url = "http://127.0.0.1:\(boundPort)\(scenario.path)"
         /// Drive `count` requests, returning each one's latency in microseconds when `record` is set.
         @discardableResult
         func hit(_ count: Int, record: Bool = false) async throws -> [Double] {
@@ -132,7 +143,7 @@ if ProcessInfo.processInfo.environment["PROBE"] != nil {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
             process.arguments = [
                 "-sv", "-o", "/dev/null", "--http1.1",
-                "http://127.0.0.1:\(boundPort)/echo/benchmark",
+                "http://127.0.0.1:\(boundPort)\(scenario.path)",
             ]
             let errors = Pipe()
             process.standardError = errors
@@ -195,7 +206,7 @@ if ProcessInfo.processInfo.environment["SKIP_INPROCESS"] == nil {
         var measurement = Measurement(scenario: "+courier", detail: "WireMVCContextHandler over the router")
         for _ in 0..<rounds {
             measurement.samples.append(
-                contentsOf: try await driveCourier(warmup: warmup, iterations: iterations)
+                contentsOf: try await driveCourier(courierRouter(), warmup: warmup, iterations: iterations)
             )
         }
         let columns = [
@@ -204,6 +215,76 @@ if ProcessInfo.processInfo.environment["SKIP_INPROCESS"] == nil {
         ]
         print(
             "+courier".padding(toLength: 22, withPad: " ", startingAt: 0)
+                + columns.map { String(format: "%8.2f", $0) }.joined(separator: " ")
+        )
+    }
+
+    // The typed tier's mechanism, which never meets the applying sender.
+    for (name, detail, contributes) in [
+        ("typed-plain", "typed outcome, no contribution", false),
+        ("typed-headers", "typed outcome + a contributed header", true),
+    ] where wanted == nil || wanted?.contains(name) == true {
+        var measurement = Measurement(scenario: name, detail: detail)
+        for _ in 0..<rounds {
+            measurement.samples.append(
+                contentsOf: try await driveCourier(
+                    typedRouter(contributingAHeader: contributes),
+                    warmup: warmup,
+                    iterations: iterations
+                )
+            )
+        }
+        let columns = [
+            measurement.minimum, measurement.percentile(50), measurement.percentile(90),
+            measurement.percentile(99), measurement.percentile(100), measurement.mean,
+        ]
+        print(
+            name.padding(toLength: 22, withPad: " ", startingAt: 0)
+                + columns.map { String(format: "%8.2f", $0) }.joined(separator: " ")
+        )
+    }
+
+    // Hummingbird on the same instrument. `hb-headers` minus `hb-plain` is its header mechanism, priced
+    // the same way `courier-headers` minus `routed-match` prices WireMVC's.
+    for (name, detail, contributes) in [
+        ("hb-plain", "Hummingbird route, in process", false),
+        ("hb-headers", "Hummingbird route + header middleware, in process", true),
+    ] where wanted == nil || wanted?.contains(name) == true {
+        var measurement = Measurement(scenario: name, detail: detail)
+        for _ in 0..<rounds {
+            measurement.samples.append(
+                contentsOf: try await driveHummingbird(
+                    hummingbirdResponder(contributingAHeader: contributes),
+                    warmup: warmup,
+                    iterations: iterations
+                )
+            )
+        }
+        let columns = [
+            measurement.minimum, measurement.percentile(50), measurement.percentile(90),
+            measurement.percentile(99), measurement.percentile(100), measurement.mean,
+        ]
+        print(
+            name.padding(toLength: 22, withPad: " ", startingAt: 0)
+                + columns.map { String(format: "%8.2f", $0) }.joined(separator: " ")
+        )
+    }
+
+    // The scope-matched pair: `courier-headers` minus `routed-match` is exactly what
+    // `proposal-headers` minus `proposal-routed` measures socketed.
+    if wanted == nil || wanted?.contains("courier-headers") == true {
+        var measurement = Measurement(scenario: "courier-headers", detail: "in-process match for proposal-headers")
+        for _ in 0..<rounds {
+            measurement.samples.append(
+                contentsOf: try await driveCourier(courierHeadersRouter(), warmup: warmup, iterations: iterations)
+            )
+        }
+        let columns = [
+            measurement.minimum, measurement.percentile(50), measurement.percentile(90),
+            measurement.percentile(99), measurement.percentile(100), measurement.mean,
+        ]
+        print(
+            "courier-headers".padding(toLength: 22, withPad: " ", startingAt: 0)
                 + columns.map { String(format: "%8.2f", $0) }.joined(separator: " ")
         )
     }
@@ -287,7 +368,7 @@ func measureAlone(
         }
         var iterator = port.stream.makeAsyncIterator()
         guard let bound = await iterator.next() else { throw HarnessError.serverNeverBound }
-        let url = "http://127.0.0.1:\(bound)/echo/benchmark"
+        let url = "http://127.0.0.1:\(bound)\(scenario.path)"
 
         func hit() async throws -> Double {
             var request = HTTPClientRequest(url: url)
@@ -372,7 +453,7 @@ print("")
 print("what each router costs (routed − routerless, same framework)")
 for (label, routed, raw) in [
     ("Hummingbird's own router     ", "hummingbird-plain", "hummingbird-raw"),
-    ("Vapor's own router           ", "vapor-plain", "vapor-raw"),
+    ("Vapor's own router           ", "vapor-plain", "vapor-raw-async"),
     ("WireMVC's router alone       ", "proposal-routed", "proposal-plain"),
     ("WireMVC.serve vs server.serve", "proposal-plain-served", "proposal-plain"),
     ("WireMVC's handler, same serve", "proposal-native", "proposal-plain-served"),
@@ -413,7 +494,7 @@ for (label, withHeader, without) in [
 
 print("")
 print("routerless floors, for reference (the servers themselves)")
-for name in ["hummingbird-raw", "vapor-raw", "proposal-plain"] {
+for name in ["hummingbird-raw", "vapor-raw-async", "vapor-raw", "proposal-plain"] {
     guard let value = byName[name] else { continue }
     let padded = name.padding(toLength: 20, withPad: " ", startingAt: 0)
     print(String(format: "  %@ p50 %8.2f µs", padded, value.percentile(50)))

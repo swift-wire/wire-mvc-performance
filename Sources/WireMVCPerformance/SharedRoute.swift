@@ -66,9 +66,14 @@ struct EchoController: RouteContributor {
             var fields = HTTPFields()
             if statesContentLength { fields[.contentLength] = String(bytes.count) }
             var body = UniqueArray<UInt8>(copying: bytes)
+            // The **three-argument** spelling, deliberately: the two-argument one binds to the proposal's
+            // extension and expands to `send` + `finish`, so a conformer's fused `sendAndFinish` witness is
+            // never reached. On the bridge that is the difference between the one-shot known-length path
+            // and the streaming rendezvous.
             try await responseSender.sendAndFinish(
                 HTTPResponse(status: .ok, headerFields: fields),
-                buffer: &body
+                buffer: &body,
+                trailer: nil
             )
         }
     }

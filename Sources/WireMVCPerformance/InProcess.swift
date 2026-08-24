@@ -89,9 +89,81 @@ func courierRouter() -> some HTTPServerRequestHandler<BenchRequestContext, Bench
     return WireMVCContextHandler(inner: builder.finalize())
 }
 
-/// Drive the courier-wrapped router, returning each request's latency in microseconds.
-func driveCourier(warmup: Int, iterations: Int) async throws -> [Double] {
-    let handler = courierRouter()
+/// **The in-process match for `proposal-headers`**: the courier on top, a route that contributes a header
+/// and wraps its sender, and a handler that states its own length.
+///
+/// Every difference from ``courierRouter()`` is one the socketed scenario also has, and every difference
+/// from the `routed-match` case below is one `proposal-headers` has over `proposal-routed`. The point is a
+/// delta measurable at ~0.05 µs that can be compared against the socketed delta directly: socketed the
+/// mechanism reads ~3 µs and the older, *unmatched* in-process cases read ~0.75, and one of those is wrong.
+func courierHeadersRouter() -> some HTTPServerRequestHandler<
+    BenchRequestContext, BenchReader, BenchResponseSender
+> {
+    var builder = TrieRouteBuilder<
+        WireMVCContext<BenchRequestContext>, BenchReader, BenchResponseSender
+    >()
+    builder.register(method: .get, path: SharedRoute.path) { _, context, parameters, _, responseSender in
+        let registry = context.responseHeaders
+        registry.add(.set(staticHeaderName, SharedHeader.value))
+        let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+        let bytes = SharedRoute.body(for: value)
+        var fields = HTTPFields()
+        fields[.contentLength] = String(bytes.count)
+        var body = UniqueArray<UInt8>(copying: bytes)
+        let applying = ResponseHeaderApplyingSender(wrapping: responseSender, registry: registry)
+        // The **two-argument** spelling, matching `proposal-headers` and matching what a hand-written raw
+        // route writes. It binds to the proposal's extension and so goes `send` → the deferred-head writer
+        // → `finish`, where the three-argument spelling would reach the wrapper's own witness and skip that
+        // writer entirely. Two different paths through the same type; this is the one raw routes take.
+        try await applying.sendAndFinish(
+            HTTPResponse(status: .ok, headerFields: fields),
+            buffer: &body
+        )
+    }
+    return WireMVCContextHandler(inner: builder.finalize())
+}
+
+/// **The typed tier's header mechanism**, which is a different mechanism from the raw one above.
+///
+/// A `@Controller` route never meets `ResponseHeaderApplyingSender` — codegen only wraps the sender for
+/// `@RawRoute`. Its terminal drains the registry itself and hands the fields to a `WireMVCOutcome`:
+///
+///     headerFields: WireMVCResponseHeaders.resolved(middleware: try await drain.drain())
+///
+/// So it uses the array-returning `drain()`, not `drain(into:)`, and `resolved` rather than applying onto
+/// a head. `contributing` toggles the contribution so the pair's difference is the mechanism.
+func typedRouter(contributingAHeader: Bool) -> some HTTPServerRequestHandler<
+    BenchRequestContext, BenchReader, BenchResponseSender
+> {
+    var builder = TrieRouteBuilder<
+        WireMVCContext<BenchRequestContext>, BenchReader, BenchResponseSender
+    >()
+    builder.register(method: .get, path: SharedRoute.path) { _, context, parameters, _, responseSender in
+        let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+        let body = SharedRoute.body(for: value)
+        guard contributingAHeader else {
+            try await WireMVCOutcome(status: .ok, body: body).send(on: responseSender)
+            return
+        }
+        let registry = context.responseHeaders
+        registry.add(.set(staticHeaderName, SharedHeader.value))
+        let fields = WireMVCResponseHeaders.resolved(middleware: try await registry.drain())
+        try await WireMVCOutcome(status: .ok, headerFields: fields, body: body).send(on: responseSender)
+    }
+    return WireMVCContextHandler(inner: builder.finalize())
+}
+
+/// Drive a courier-wrapped router, returning each request's latency in microseconds.
+func driveCourier<Handler: HTTPServerRequestHandler>(
+    _ handler: Handler,
+    warmup: Int,
+    iterations: Int
+) async throws -> [Double]
+where
+    Handler.RequestContext == BenchRequestContext,
+    Handler.Reader == BenchReader,
+    Handler.ResponseSender == BenchResponseSender
+{
     let request = HTTPRequest(method: .get, scheme: "http", authority: "bench", path: "/echo/benchmark")
 
     func once() async throws {
@@ -360,6 +432,81 @@ let inProcessCases: [InProcessCase] = [
                 HTTPResponse(status: .ok, headerFields: fields),
                 buffer: &body
             )
+        }
+    },
+    /// **The in-process match for `proposal-routed`**: the trie with no courier, a handler that states its
+    /// own length and sends. `courier-headers` minus this is the header mechanism, scope-matched.
+    InProcessCase(name: "routed-match", detail: "the in-process match for proposal-routed") {
+        var builder = TrieRouteBuilder<BenchRequestContext, BenchReader, BenchResponseSender>()
+        builder.register(method: .get, path: SharedRoute.path) { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let bytes = SharedRoute.body(for: value)
+            var fields = HTTPFields()
+            fields[.contentLength] = String(bytes.count)
+            var body = UniqueArray<UInt8>(copying: bytes)
+            try await responseSender.sendAndFinish(
+                HTTPResponse(status: .ok, headerFields: fields),
+                buffer: &body,
+                trailer: nil
+            )
+        }
+        return builder.finalize()
+    },
+    // `drain(into:)` — the same work as `+apply-direct`, without the intermediate array `drain()` returns
+    // for its caller to immediately iterate and discard.
+    InProcessCase(
+        name: "+drain-into",
+        detail: "contributions applied straight into the fields"
+    ) {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let registry = ResponseHeaderRegistry()
+            registry.add(.set(staticHeaderName, SharedHeader.value))
+            var fields = HTTPFields()
+            try await registry.drain(into: &fields)
+            try await WireMVCOutcome(status: .ok, headerFields: fields, body: SharedRoute.body(for: value))
+                .send(on: responseSender)
+        }
+    },
+    // What does inserting into `HTTPFields` actually cost, and does the *first* insertion differ from the
+    // rest? This is the question behind "Hummingbird's middleware is cheaper": its middleware assigns into
+    // a `Response` whose headers already exist, where WireMVC may be inserting into a set built from
+    // nothing. If the first insertion is dear and later ones are cheap, that is the whole difference.
+    InProcessCase(name: "+fields-0", detail: "outcome with no header fields") {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            try await WireMVCOutcome(status: .ok, body: SharedRoute.body(for: value))
+                .send(on: responseSender)
+        }
+    },
+    InProcessCase(name: "+fields-1", detail: "outcome with one header field") {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            var fields = HTTPFields()
+            fields[.contentType] = "text/plain"
+            try await WireMVCOutcome(status: .ok, headerFields: fields, body: SharedRoute.body(for: value))
+                .send(on: responseSender)
+        }
+    },
+    InProcessCase(name: "+fields-2", detail: "outcome with two header fields") {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            var fields = HTTPFields()
+            fields[.contentType] = "text/plain"
+            fields[.cacheControl] = "no-store"
+            try await WireMVCOutcome(status: .ok, headerFields: fields, body: SharedRoute.body(for: value))
+                .send(on: responseSender)
+        }
+    },
+    InProcessCase(name: "+fields-3", detail: "outcome with three header fields") {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            var fields = HTTPFields()
+            fields[.contentType] = "text/plain"
+            fields[.cacheControl] = "no-store"
+            fields[staticHeaderName] = SharedHeader.value
+            try await WireMVCOutcome(status: .ok, headerFields: fields, body: SharedRoute.body(for: value))
+                .send(on: responseSender)
         }
     },
     // The registry *used*, bisected. Socketed, contributing one header measured ~3 µs above not
