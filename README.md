@@ -161,19 +161,62 @@ is more useful than either number alone. The two now agree: the socketed row rea
 
 ### What WireMVC allocates, and whether it needs to
 
-Nine allocations and 756 bytes per request, bisected in process:
+**Twelve allocations and 920 bytes per request**, bisected in process. Re-measured 2026-08-25 against
+wire-mvc `1437735`; it read nine and 756 when this section was first written, and where the difference
+went is the interesting part:
 
 ```
 what                                          allocs/req   bytes/req
-literal route, handler does nothing                  2.0         226
+literal route, handler does nothing                  2.0         224
 + binding one {parameter}                           +2.0        +232
 + building and writing the response                 +4.0        +262
-+ ResponseHeaderRegistry (the courier)              +1.0         +36
-                                                     9.0         756
++ stating a Content-Length                          +4.0        +258
++ WireMVCOutcome's `[:]` default                    +1.0         +92   ← found here, now fixed
++ ResponseHeaderRegistry (the courier)              +0.0          +0
+                                                    12.0         920
 ```
 
+Each row is a pair of cases differing in exactly one thing, and every figure reproduces to the allocation
+across runs. The method is the *slope* rather than a single total: each case is run at 22,000 and 62,000
+requests and the difference divided by 40,000, so process startup cancels and the figure is per-request
+without needing a null baseline.
+
+**The four new ones are the framing fix, and they are not `String(Int)`.** `+trie-length-static`, which
+builds the length string once at registration, measures identically to `+trie-length`, which builds it per
+request — a length like `"1024"` fits Swift's inline string form and never reaches the allocator. All four
+are the **field insertion**. That is not WireMVC's number: the `+fields-N` ladder (13 → 16 → 20 → 23) puts
+every response header field at 3–4 allocations, which is what `HTTPFields` costs to insert into.
+
+**One of the four looked like the spelling, and it is not — this was tried and refuted.** `routed-match`
+states the same length by building `var fields = HTTPFields()` and handing it to
+`HTTPResponse(status:headerFields:)`, and costs **3**, where `stateLengthIfAbsent` mutating an
+already-constructed response costs **4**. So the typed path was changed to state the length into a local
+`HTTPFields` before constructing the response — and measured **identical**, 12 either way.
+
+The reason is the difference between the two cases, not between the two spellings: `routed-match` builds
+its fields *fresh*, while `WireMVCOutcome.send` must copy `headerFields` off the outcome, and that copy
+costs exactly what the later mutation would have. The allocation moves; it does not go. The change was
+reverted and the reasoning left in the source, since it is the kind that will otherwise be proposed again.
+
+**The `[:]` was a defect, not a cost, and is fixed.** `WireMVCOutcome.init` defaulted
+`headerFields: HTTPFields = [:]` — a dictionary literal, the exact spelling wire-mvc #129 removed from
+`WireMVCResponseHeaders.resolved` after measuring it at one allocation per call. `+outcome-fields` passes
+`HTTPFields()` explicitly and differed in nothing else, which is how it was found: 13 against 12. It was
+paid by every typed route that does not return header fields, which is most of them. All seven remaining
+defaults — six in `Responses.swift`, one in `StreamingResponses.swift` — now spell it `HTTPFields()`, and
+`+outcome` measures 12.
+
+**That pair is now the regression guard.** `+outcome` and `+outcome-fields` differ in nothing but the
+default, so they should measure *identical*. If `+outcome` ever reads one above `+outcome-fields` again, a
+dictionary literal has come back.
+
+**The registry now measures zero, and that is a limit of the measurement.** It read +1 when this was first
+written. In these cases the registry never escapes the handler, so the optimiser is free to promote it;
+in the real courier it escapes into the request context and cannot be. Read the 0 as "this bisection can
+no longer see it" rather than as "it is free" — measuring it honestly needs a case where it escapes.
+
 For contrast, **Hummingbird's router adds none** — its routed and routerless scenarios allocate the same.
-So these are not the cost of routing as such; they are choices in this implementation. Three look avoidable:
+So these are not the cost of routing as such; they are choices in this implementation. Four look avoidable:
 
 - **The two baseline allocations.** `FrozenRouteTrie.resolve` does
   `requestPath.split(separator: "/", omittingEmptySubsequences: true)`, materialising an `[Substring]` for
@@ -186,10 +229,15 @@ So these are not the cost of routing as such; they are choices in this implement
   against the route's own `parameterNames` instead.
 - **The registry.** `ResponseHeaderRegistry` is a `final class` the courier instantiates per request,
   whether or not any middleware contributes a header. Allocating it lazily on first contribution would
-  make the common case free.
+  make the common case free. Note the caveat above: this bisection no longer measures it.
+- **The `[:]` default**, which is a one-line fix and the only item here that is a mistake rather than a
+  trade.
 
 The remaining four, for building and writing the response, are the least suspicious: producing bytes and
-handing them to a sender is the work itself.
+handing them to a sender is the work itself. The four for framing are a trade rather than a waste — they
+bought a p99 tail of 12–19 µs on every server tested, which is four orders of magnitude more than four
+allocations cost. They are listed because they are countable and were not counted before, not because
+they should be given back.
 
 None of this is urgent — the whole path is ~1 µs — but it is the difference between "as cheap as
 Hummingbird's router" and "nine allocations cheaper than it looks". The bridge's 46 and 105 are the

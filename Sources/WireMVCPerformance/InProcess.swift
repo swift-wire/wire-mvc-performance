@@ -293,6 +293,56 @@ let inProcessCases: [InProcessCase] = [
                 .send(on: responseSender)
         }
     },
+    // Does *stating a length* cost anything? `trie-only` writes a bare `HTTPResponse(status:)`; this is the
+    // same handler with the `Content-Length` every WireMVC response has carried since the framing fix, set
+    // the way `stateLengthIfAbsent` sets it. The pair differs in nothing else — same spelling of
+    // `sendAndFinish`, same body — so the gap is the framing and only the framing.
+    InProcessCase(
+        name: "+trie-length",
+        detail: "the same, stating a Content-Length"
+    ) {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let bytes = SharedRoute.body(for: value)
+            var response = HTTPResponse(status: .ok)
+            response.headerFields[.contentLength] = String(bytes.count)
+            var body = UniqueArray<UInt8>(copying: bytes)
+            try await responseSender.sendAndFinish(response, buffer: &body)
+        }
+    },
+    // Is the framing cost the `String(length)` or the field insertion? `stateLengthIfAbsent` spells it
+    // `headerFields[.contentLength] = String(length)`, so the two are paid together. Here the body is a
+    // fixed size, so the length string can be built once at registration — the gap against `+trie-length`
+    // is `String(Int)` and nothing else.
+    InProcessCase(
+        name: "+trie-length-static",
+        detail: "the same, with the length string built once"
+    ) {
+        let length = String(SharedRoute.body(for: "benchmark").count)
+        return router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            let bytes = SharedRoute.body(for: value)
+            var response = HTTPResponse(status: .ok)
+            response.headerFields[.contentLength] = length
+            var body = UniqueArray<UInt8>(copying: bytes)
+            try await responseSender.sendAndFinish(response, buffer: &body)
+        }
+    },
+    // `WireMVCOutcome.init` defaults `headerFields` to `[:]`, which is a dictionary literal — the spelling
+    // #129 removed from `WireMVCResponseHeaders.resolved` after measuring it at one allocation per call.
+    // This case passes `HTTPFields()` explicitly and differs from `+outcome` in nothing else, so the gap
+    // is that default and only that default.
+    InProcessCase(
+        name: "+outcome-fields",
+        detail: "the same outcome, with an explicit empty HTTPFields"
+    ) {
+        router { _, _, parameters, _, responseSender in
+            let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
+            try await WireMVCOutcome(
+                status: .ok, headerFields: HTTPFields(), body: SharedRoute.body(for: value)
+            ).send(on: responseSender)
+        }
+    },
     InProcessCase(
         name: "+registry",
         detail: "outcome, with a response-header registry drained into it"
