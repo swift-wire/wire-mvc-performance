@@ -401,7 +401,10 @@ struct ProposalWrapped: Scenario {
             var fields = HTTPFields()
             fields[.contentLength] = String(bytes.count)
             var body = UniqueArray<UInt8>(copying: bytes)
-            let applying = ResponseHeaderApplyingSender(wrapping: sender, registry: context.responseHeaders)
+            let applyingContents = context.takeContents()
+            let applying = ResponseHeaderApplyingSender(
+                wrapping: sender, registry: applyingContents.responseHeaders.take()
+            )
             try await applying.sendAndFinish(
                 HTTPResponse(status: .ok, headerFields: fields),
                 buffer: &body
@@ -447,7 +450,8 @@ struct ProposalHeaders: Scenario {
             var reader = reader
             var drained = UniqueArray<UInt8>()
             _ = try await reader.collect(into: &drained, maximumSize: 0)
-            let registry = context.responseHeaders
+            let contents = context.takeContents()
+            var registry = contents.responseHeaders.take()
             registry.add(.set(.init(SharedHeader.name)!, SharedHeader.value))
             let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
             let bytes = SharedRoute.body(for: value)

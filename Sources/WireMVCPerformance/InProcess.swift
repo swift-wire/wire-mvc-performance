@@ -103,7 +103,8 @@ func courierHeadersRouter() -> some HTTPServerRequestHandler<
         WireMVCContext<BenchRequestContext>, BenchReader, BenchResponseSender
     >()
     builder.register(method: .get, path: SharedRoute.path) { _, context, parameters, _, responseSender in
-        let registry = context.responseHeaders
+        let contents = context.takeContents()
+        var registry = contents.responseHeaders.take()
         registry.add(.set(staticHeaderName, SharedHeader.value))
         let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
         let bytes = SharedRoute.body(for: value)
@@ -145,7 +146,8 @@ func typedRouter(contributingAHeader: Bool) -> some HTTPServerRequestHandler<
             try await WireMVCOutcome(status: .ok, body: body).send(on: responseSender)
             return
         }
-        let registry = context.responseHeaders
+        let contents = context.takeContents()
+        var registry = contents.responseHeaders.take()
         registry.add(.set(staticHeaderName, SharedHeader.value))
         let fields = WireMVCResponseHeaders.resolved(middleware: try await registry.drain())
         try await WireMVCOutcome(status: .ok, headerFields: fields, body: body).send(on: responseSender)
@@ -349,7 +351,7 @@ let inProcessCases: [InProcessCase] = [
     ) {
         router { _, _, parameters, _, responseSender in
             let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
-            let registry = ResponseHeaderRegistry()
+            var registry = ResponseHeaderRegistry()
             let fields = WireMVCResponseHeaders.resolved(middleware: try await registry.drain())
             try await WireMVCOutcome(status: .ok, headerFields: fields, body: SharedRoute.body(for: value))
                 .send(on: responseSender)
@@ -365,7 +367,7 @@ let inProcessCases: [InProcessCase] = [
     ) {
         router { _, _, parameters, _, responseSender in
             let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
-            let registry = ResponseHeaderRegistry()
+            var registry = ResponseHeaderRegistry()
             try await WireMVCOutcome(status: .ok, body: SharedRoute.body(for: value))
                 .send(on: responseSender)
             // Synchronous, and after the send: `withExtendedLifetime` takes no async closure, and the
@@ -379,7 +381,7 @@ let inProcessCases: [InProcessCase] = [
     ) {
         router { _, _, parameters, _, responseSender in
             let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
-            let registry = ResponseHeaderRegistry()
+            var registry = ResponseHeaderRegistry()
             registry.add(.set(staticHeaderName, SharedHeader.value))
             try await WireMVCOutcome(status: .ok, body: SharedRoute.body(for: value))
                 .send(on: responseSender)
@@ -395,7 +397,7 @@ let inProcessCases: [InProcessCase] = [
     ) {
         router { _, _, parameters, _, responseSender in
             let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
-            let registry = ResponseHeaderRegistry()
+            var registry = ResponseHeaderRegistry()
             registry.add(.set(staticHeaderName, SharedHeader.value))
             _ = try await registry.drain()
             try await WireMVCOutcome(status: .ok, body: SharedRoute.body(for: value))
@@ -410,7 +412,7 @@ let inProcessCases: [InProcessCase] = [
     ) {
         router { _, _, parameters, _, responseSender in
             let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
-            let registry = ResponseHeaderRegistry()
+            var registry = ResponseHeaderRegistry()
             registry.add(.set(staticHeaderName, SharedHeader.value))
             let fields = WireMVCResponseHeaders.resolved(middleware: try await registry.drain())
             try await WireMVCOutcome(status: .ok, headerFields: fields, body: SharedRoute.body(for: value))
@@ -427,7 +429,7 @@ let inProcessCases: [InProcessCase] = [
     ) {
         router { _, _, parameters, _, responseSender in
             let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
-            let registry = ResponseHeaderRegistry()
+            var registry = ResponseHeaderRegistry()
             registry.add(.set(staticHeaderName, SharedHeader.value))
             var fields = HTTPFields()
             for contribution in try await registry.drain() {
@@ -450,7 +452,7 @@ let inProcessCases: [InProcessCase] = [
     ) {
         router { _, _, parameters, _, responseSender in
             let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
-            let registry = ResponseHeaderRegistry()
+            var registry = ResponseHeaderRegistry()
             registry.add(.set(staticHeaderName, SharedHeader.value))
             var fields = HTTPFields()
             for contribution in try await registry.drain() {
@@ -470,7 +472,7 @@ let inProcessCases: [InProcessCase] = [
     ) {
         router { _, _, parameters, _, responseSender in
             let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
-            let registry = ResponseHeaderRegistry()
+            var registry = ResponseHeaderRegistry()
             registry.add(.set(staticHeaderName, SharedHeader.value))
             let bytes = SharedRoute.body(for: value)
             var fields = HTTPFields()
@@ -510,7 +512,7 @@ let inProcessCases: [InProcessCase] = [
     ) {
         router { _, _, parameters, _, responseSender in
             let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
-            let registry = ResponseHeaderRegistry()
+            var registry = ResponseHeaderRegistry()
             registry.add(.set(staticHeaderName, SharedHeader.value))
             var fields = HTTPFields()
             try await registry.drain(into: &fields)
@@ -568,7 +570,7 @@ let inProcessCases: [InProcessCase] = [
     ) {
         router { _, _, parameters, _, responseSender in
             let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
-            let registry = ResponseHeaderRegistry()
+            var registry = ResponseHeaderRegistry()
             registry.add(.set(.init(SharedHeader.name)!, SharedHeader.value))
             let fields = WireMVCResponseHeaders.resolved(middleware: try await registry.drain())
             try await WireMVCOutcome(status: .ok, headerFields: fields, body: SharedRoute.body(for: value))
@@ -583,7 +585,7 @@ let inProcessCases: [InProcessCase] = [
     ) {
         router { _, _, parameters, _, responseSender in
             let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
-            let registry = ResponseHeaderRegistry()
+            var registry = ResponseHeaderRegistry()
             registry.add(.set(.init(SharedHeader.name)!, SharedHeader.value))
             var body = UniqueArray<UInt8>(copying: SharedRoute.body(for: value))
             let applying = ResponseHeaderApplyingSender(wrapping: responseSender, registry: registry)

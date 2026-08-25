@@ -172,7 +172,7 @@ literal route, handler does nothing                  2.0         224
 + building and writing the response                 +4.0        +262
 + stating a Content-Length                          +4.0        +258
 + WireMVCOutcome's `[:]` default                    +1.0         +92   ← found here, now fixed
-+ ResponseHeaderRegistry (the courier)              +0.0          +0
++ ResponseHeaderRegistry (the courier)              +0.0          +0   ← see below; now +0 for real
                                                     12.0         920
 ```
 
@@ -210,10 +210,25 @@ defaults — six in `Responses.swift`, one in `StreamingResponses.swift` — now
 default, so they should measure *identical*. If `+outcome` ever reads one above `+outcome-fields` again, a
 dictionary literal has come back.
 
-**The registry now measures zero, and that is a limit of the measurement.** It read +1 when this was first
-written. In these cases the registry never escapes the handler, so the optimiser is free to promote it;
-in the real courier it escapes into the request context and cannot be. Read the 0 as "this bisection can
-no longer see it" rather than as "it is free" — measuring it honestly needs a case where it escapes.
+**The registry measured zero here for the wrong reason, and has since been measured properly.** It read +1
+when this was first written, then 0: in these cases the registry never escapes the handler, so the
+optimiser is free to promote it. The honest measurement needs a case where it escapes, and `+courier` and
+`courier-headers` are those cases — the courier is exactly where it escapes into the request context.
+
+Measured across two builds of wire-mvc, before and after `ResponseHeaderRegistry` became a `~Copyable`
+struct, with the same slope method and two replicates that agreed to the allocation:
+
+| pair | before | after |
+|---|---|---|
+| `+courier` − `trie-only` | +6.00 allocs, +1536 B | **+0.00, +0 B** |
+| `courier-headers` − `routed-match` | +36.00 allocs, +3924 B | **+30.00, +2388 B** |
+
+`trie-only` (48.00) and `routed-match` (66.00) are unchanged between the builds, which is the control.
+
+The `courier-headers` row is the one that rules out the optimiser: that case contributes a field, drains
+it and wraps the sender, so the registry is genuinely used, and it saves the *same* 6.00. Six rather than
+the one the change predicted, and **why it is six is not attributed** — an extra async frame would not
+explain it, since `WireMVCContextHandler` is untouched and the after-figure is zero.
 
 For contrast, **Hummingbird's router adds none** — its routed and routerless scenarios allocate the same.
 So these are not the cost of routing as such; they are choices in this implementation. Four look avoidable:
@@ -227,9 +242,12 @@ So these are not the cost of routing as such; they are choices in this implement
   `[String: Substring]` via `Dictionary(zip(...))`. Most routes bind nought to two parameters, where a
   small inline buffer would avoid the dictionary entirely, and the handler's lookup by name could resolve
   against the route's own `parameterNames` instead.
-- **The registry.** `ResponseHeaderRegistry` is a `final class` the courier instantiates per request,
-  whether or not any middleware contributes a header. Allocating it lazily on first contribution would
-  make the common case free. Note the caveat above: this bisection no longer measures it.
+- ~~**The registry.**~~ **Done, and better than the suggestion here.** This read "a `final class` the
+  courier instantiates per request, whether or not any middleware contributes a header — allocating it
+  lazily on first contribution would make the common case free". It is now a `~Copyable` struct that is
+  never heap-allocated at all, so *every* case is free, not just the uncontributed one. That was done for
+  an ownership reason rather than this one (see wire-mvc's `LinearResponseHeaderRegistry.md`); the six
+  allocations are a side payment.
 - **The `[:]` default**, which is a one-line fix and the only item here that is a mistake rather than a
   trade.
 
