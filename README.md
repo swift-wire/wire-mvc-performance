@@ -85,13 +85,30 @@ The in-process pair is scope-matched and resolves ~0.05 µs. Against it the whol
 **That +0.29 is the field insertion, and Hummingbird pays it too.** `+fields-1` − `+fields-0` — an
 outcome with one header field against one with none, no registry, no drain, no resolve — measures
 **+0.25 … +0.29** independently. Hummingbird's middleware body is `response.headers[name] = value`: the
-same subscript on the same `HTTPFields` type. So of its +0.65, about +0.29 is the identical operation.
-(Inferred, not measured — there is no in-process Hummingbird case to bisect.)
+same subscript on the same `HTTPFields` type.
 
-What is left as *WireMVC's* mechanism, over and above the insertion both frameworks make, is **~0.1 µs**:
-registering costs nothing measurable, and draining costs +0.04 … +0.08. Not a microsecond, and not the
-field-set construction the section below blames — see it for the shape of the design, but the arithmetic
-above for where the time actually goes.
+**Put both frameworks on that instrument and the socketed ordering reverses.** `hb-plain` / `hb-headers`
+drive Hummingbird's own router and middleware through `buildResponder()`, no socket, same clock and same
+round structure as the WireMVC pair:
+
+| mechanism, in process | p50 | across 6 runs |
+|---|---|---|
+| **WireMVC registry + applying** | **+0.43** | +0.41 … +0.46 |
+| Hummingbird `RouterMiddleware` | **+0.59** | +0.21 … +0.75 |
+
+So WireMVC's mechanism is *not* a microsecond dearer than Hummingbird's; on the instrument that can
+resolve them, it is marginally cheaper. Both are dominated by the same `HTTPFields` insertion — about
++0.29 of each — and what differs is what surrounds it: WireMVC's drain at +0.04 … +0.08, Hummingbird's
+middleware chain at roughly +0.3.
+
+**Read Hummingbird's row with its floor in mind.** `hb-plain` sits at ~16.3 µs where `routed-match` sits at
+~0.88, so its delta is a small difference between two large numbers and its spread is an order of magnitude
+wider (±0.27 against ±0.02). The median is stable across six runs and the range does not reach zero, which
+is enough to say the two mechanisms are within a few tenths of each other — and not enough to rank them
+finely.
+
+Neither is the field-set construction the section below blames — see it for the shape of the design, but
+the arithmetic above for where the time actually goes.
 
 **The linear registry did not move this row, and that is the interesting part.** wire-mvc #148 removed six
 allocations and 1536 bytes per request from the courier (see *the registry* below). Socketed, the row is
