@@ -45,17 +45,42 @@ fixed.
 Each framework adds one field on the way out, through whatever mechanism it offers, priced against its own
 plain routed scenario.
 
-| mechanism | min | p50 | p50 across runs |
+Re-measured 2026-08-26 against wire-mvc `1cae23d`, six runs, each scenario alone in six shuffled rounds.
+Median p50 across the six, with the spread beside it:
+
+| mechanism | p50 | across 6 runs | previously |
 |---|---|---|---|
-| Hummingbird `RouterMiddleware` | +0.75 | **+0.50** | +0.50 … +1.08 |
-| Vapor `Middleware` (future-based) | +1.25 | **+1.25** | — |
-| **WireMVC registry + applying** | −0.12 | **+1.42** | +1.42 … +2.88 |
-| Vapor `AsyncMiddleware` | +15.42 | **+15.92** | +15.13 … +15.92 |
+| Hummingbird `RouterMiddleware` | **+0.65** | +0.38 … +2.08 | +0.50 |
+| Vapor `Middleware` (future-based) | **+0.98** | +0.21 … +1.29 | +1.25 |
+| **WireMVC registry + applying** | **+1.96** | +1.62 … +3.21 | +1.42 |
+| Vapor `AsyncMiddleware` | **+15.92** | +15.54 … +16.75 | +15.92 |
+
+**`min` is no longer quoted, because it is not a measurement at this scale.** Across the six runs it ranged
+from −12.96 to +14.04 for the same row: a fastest-sample-minus-fastest-sample difference between two
+separately-driven scenarios is noise, and quoting it invited reading a negative cost into it. p50 with its
+spread is what this comparison can support.
+
+**The ordering is unchanged and every row is within its own spread of the previous figures.** Vapor's
+`AsyncMiddleware` reproduces at *exactly* +15.92, which is the control: the machine and harness are
+comparable to the run these numbers replace, so the smaller movements elsewhere are noise rather than
+drift.
 
 WireMVC's mechanism costs about a microsecond more than Hummingbird's, which is consistent with the
 in-process bisection putting the whole thing at ~0.8 µs against Hummingbird's near-zero. It has to
 construct the field set — see [why](#why-wiremvcs-header-mechanism-costs-more-by-design) — where the other
 two mutate a `Response` object that already exists.
+
+**The linear registry did not move this row, and that is the interesting part.** wire-mvc #148 removed six
+allocations and 1536 bytes per request from the courier (see *the registry* below). Socketed, the row is
+unchanged within noise — but socketed noise here is ±1.6 µs, which cannot resolve six allocations either
+way. The in-process pair can, at ~0.05 µs, and it is unambiguous: `courier-headers` − `routed-match`
+measures **+0.41 µs before the change and +0.41 µs after**, p50 identical to the hundredth across three
+reps of each binary.
+
+So six allocations per request bought **no measurable time**. That is not a disappointment, it is this
+phase's thesis holding: allocations here are real and countable, latency is already at parity, and anyone
+reaching for allocation work as a *performance* fix is reaching for the wrong thing — the bridge costs
+16–47 µs and all of this is fractions of one.
 
 **Vapor's `AsyncMiddleware` costs ~16 µs per middleware, and that is not Vapor's middleware.** A second
 one costs another ~14, so it is per-middleware rather than one-off chain construction; the same header
