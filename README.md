@@ -65,10 +65,33 @@ spread is what this comparison can support.
 comparable to the run these numbers replace, so the smaller movements elsewhere are noise rather than
 drift.
 
-WireMVC's mechanism costs about a microsecond more than Hummingbird's, which is consistent with the
-in-process bisection putting the whole thing at ~0.8 µs against Hummingbird's near-zero. It has to
-construct the field set — see [why](#why-wiremvcs-header-mechanism-costs-more-by-design) — where the other
-two mutate a `Response` object that already exists.
+**The WireMVC-vs-Hummingbird gap in that table is mostly not real, and the socketed measurement cannot
+settle it.** Their spreads overlap (+1.62…+3.21 against +0.38…+2.08): the noise is ±1.6 µs and the
+claimed difference is ~1.3. The row is also **not scope-matched** the way Hummingbird's is: `proposal-headers`
+serves on `WireMVCContextServer` while `proposal-routed` serves on the bare server, so it charges WireMVC
+for the courier layer as well as the header mechanism, which is the same mistake `proposal-routed` exists
+to have stopped making for the router row.
+
+The in-process pair is scope-matched and resolves ~0.05 µs. Against it the whole mechanism is
+**+0.41 µs**, and the ladder says what of:
+
+| rung | p50 | what it adds |
+|---|---|---|
+| `+outcome` → `+reg-add` | **+0.00** | creating the registry and registering a contribution |
+| `+reg-add` → `+drain-only` | **+0.04 … +0.08** | draining it |
+| `+drain-only` → `+resolve` | **+0.29** | applying the drained contribution into `HTTPFields` |
+| `routed-match` → `courier-headers` | **+0.41 … +0.46** | all of it, end to end |
+
+**That +0.29 is the field insertion, and Hummingbird pays it too.** `+fields-1` − `+fields-0` — an
+outcome with one header field against one with none, no registry, no drain, no resolve — measures
+**+0.25 … +0.29** independently. Hummingbird's middleware body is `response.headers[name] = value`: the
+same subscript on the same `HTTPFields` type. So of its +0.65, about +0.29 is the identical operation.
+(Inferred, not measured — there is no in-process Hummingbird case to bisect.)
+
+What is left as *WireMVC's* mechanism, over and above the insertion both frameworks make, is **~0.1 µs**:
+registering costs nothing measurable, and draining costs +0.04 … +0.08. Not a microsecond, and not the
+field-set construction the section below blames — see it for the shape of the design, but the arithmetic
+above for where the time actually goes.
 
 **The linear registry did not move this row, and that is the interesting part.** wire-mvc #148 removed six
 allocations and 1536 bytes per request from the courier (see *the registry* below). Socketed, the row is
@@ -107,6 +130,11 @@ The proposal hands a handler a **sender**, not a return slot. `HTTPResponse` is 
 consumed, so by the time an outer middleware resumes, the head is on the wire. There is no response object
 to mutate. A contribution therefore has to be registered on the way in and applied at the moment of
 writing, which is the registry plus `ResponseHeaderApplyingSender`.
+
+**This explains the shape, and it turned out not to explain much cost.** The bisection above prices
+registering at nothing measurable and draining at +0.04 … +0.08 µs; the bulk of the mechanism is the
+`HTTPFields` insertion, which a mutate-the-response design performs too. The indirection is real and
+nearly free — what it buys back is that the head can go out as soon as the handler decides it.
 
 So WireMVC pays *construction* where the others pay *mutation* — the cost of the head reaching the socket
 as soon as the handler decides it, which is what makes streaming start promptly. A trade, not an
