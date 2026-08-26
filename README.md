@@ -67,8 +67,9 @@ drift.
 
 **The WireMVC-vs-Hummingbird gap in that table is mostly not real, and the socketed measurement cannot
 settle it.** Their spreads overlap (+1.62…+3.21 against +0.38…+2.08): the noise is ±1.6 µs and the
-claimed difference is ~1.3. The row is also **not scope-matched** the way Hummingbird's is: `proposal-headers`
-serves on `WireMVCContextServer` while `proposal-routed` serves on the bare server, so it charges WireMVC
+claimed difference is ~1.3. The row is also **not scope-matched** the way Hummingbird's is:
+`proposal-headers` serves on `WireMVCContextServer` while `proposal-routed` serves on the bare server, so
+it charges WireMVC
 for the courier layer as well as the header mechanism, which is the same mistake `proposal-routed` exists
 to have stopped making for the router row.
 
@@ -87,28 +88,37 @@ outcome with one header field against one with none, no registry, no drain, no r
 **+0.25 … +0.29** independently. Hummingbird's middleware body is `response.headers[name] = value`: the
 same subscript on the same `HTTPFields` type.
 
-**Put both frameworks on that instrument and the socketed ordering reverses.** `hb-plain` / `hb-headers`
-drive Hummingbird's own router and middleware through `buildResponder()`, no socket, same clock and same
-round structure as the WireMVC pair:
+**Put both frameworks on that instrument.** `hb-plain` / `hb-headers` drive Hummingbird's own router and
+middleware through `buildResponder()`, no socket, same clock and same round structure as the WireMVC pair:
 
 | mechanism, in process | p50 | across 6 runs |
 |---|---|---|
-| **WireMVC registry + applying** | **+0.43** | +0.41 … +0.46 |
-| Hummingbird `RouterMiddleware` | **+0.59** | +0.21 … +0.75 |
+| Hummingbird `RouterMiddleware` | **+0.29** | +0.29 … +0.29 |
+| **WireMVC registry + applying** | **+0.41** | +0.37 … +0.58 |
 
-So WireMVC's mechanism is *not* a microsecond dearer than Hummingbird's; on the instrument that can
-resolve them, it is marginally cheaper. Both are dominated by the same `HTTPFields` insertion — about
-+0.29 of each — and what differs is what surrounds it: WireMVC's drain at +0.04 … +0.08, Hummingbird's
-middleware chain at roughly +0.3.
+**Hummingbird's mechanism is the field insertion and nothing else** — its +0.29 lands exactly on the
+`+fields-1` − `+fields-0` figure, arrived at from the other direction. WireMVC's +0.41 is that same
+insertion plus its drain, and the ~0.12 between them is the registry: what it costs to register a
+contribution on the way in and evaluate it on the way out, rather than mutating a response that already
+exists.
 
-**Read Hummingbird's row with its floor in mind.** `hb-plain` sits at ~16.3 µs where `routed-match` sits at
-~0.88, so its delta is a small difference between two large numbers and its spread is an order of magnitude
-wider (±0.27 against ±0.02). The median is stable across six runs and the range does not reach zero, which
-is enough to say the two mechanisms are within a few tenths of each other — and not enough to rank them
-finely.
+So the honest gap is **about a tenth of a microsecond**, not the ~1.3 the socketed rows imply, and it is
+in the direction the design predicts.
 
-Neither is the field-set construction the section below blames — see it for the shape of the design, but
-the arithmetic above for where the time actually goes.
+> **These two rows were wrong here until the driver was fixed, and the error was 15 µs.**
+> `HTTPResponder.respond` is `@Sendable`, this package enables `NonisolatedNonsendingByDefault` and
+> Hummingbird does not, so driving it from a `nonisolated(nonsending)` caller hopped to the global executor
+> and back on every request — twice, counting the body write. `hb-plain` read **15.9 µs** against
+> `routed-match`'s 0.88, and the header delta was a small difference between two hop-laden numbers, noisy
+> enough (+0.21 … +0.75) to have been published as "Hummingbird +0.59, marginally dearer than WireMVC".
+> Marking the driver `@concurrent` puts it on the executor the call already wants — which is where a real
+> server drives it from, and why the socketed rows never showed this — and `hb-plain` drops to **1.02 µs**,
+> next to `routed-match`'s 0.88. The WireMVC cases were checked for the same fault and do not have it:
+> `HTTPServerRequestHandler.handle` is `nonisolated(nonsending)`, so `routed-match` measures 0.88 on either
+> executor.
+
+That ~0.12 is not the field-set construction the section below blames — see it for the shape of the
+design, but the arithmetic above for where the time actually goes.
 
 **The linear registry did not move this row, and that is the interesting part.** wire-mvc #148 removed six
 allocations and 1536 bytes per request from the courier (see *the registry* below). Socketed, the row is

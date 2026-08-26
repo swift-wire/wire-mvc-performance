@@ -1,3 +1,4 @@
+import Foundation
 import Hummingbird
 import Logging
 import HTTPTypes
@@ -74,6 +75,16 @@ struct DiscardingBodyWriter: ResponseBodyWriter {
 ///
 /// The response body is consumed, because the socketed path writes it and a comparison that skipped it
 /// would price a different amount of work on each side.
+/// > Important: `@concurrent`, and it is worth 15 µs of the 16 this used to report.
+/// > `HTTPResponder.respond` is `@Sendable`, and this package enables `NonisolatedNonsendingByDefault`
+/// > while Hummingbird does not. Driven from a `nonisolated(nonsending)` caller, every request hopped to
+/// > the global executor and back — twice, counting the body write — and the hops, not Hummingbird, were
+/// > what the clock saw: `hb-plain` read **15.9 µs** that way and reads **1.04** on the executor the call
+/// > actually wants. A real server already drives the responder from there, which is why the socketed
+/// > rows never showed it. The WireMVC cases were checked for the same fault and do not have it —
+/// > `HTTPServerRequestHandler.handle` is `nonisolated(nonsending)`, so it runs inline on whichever
+/// > executor the caller is on: `routed-match` measures 0.88 either way.
+@concurrent
 func driveHummingbird(
     _ responder: some HTTPResponder<BenchHummingbirdContext>,
     warmup: Int,
