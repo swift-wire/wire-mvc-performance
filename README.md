@@ -105,6 +105,35 @@ exists.
 So the honest gap is **about a tenth of a microsecond**, not the ~1.3 the socketed rows imply, and it is
 in the direction the design predicts.
 
+**Splitting that tenth: about a third is the registry's size and two thirds is the indirection.** Making
+the registry `~Copyable` turned an 8-byte class pointer into a **240-byte value**, moved about five times
+per request — courier, `takeContents`, into the box, out of the destructure, into the wrapper. Shrinking it
+by lowering the inline capacity measures the cost of that directly:
+
+| `inlineCapacity` | registry size | mechanism |
+|---|---|---|
+| 4 (shipped) | 240 B | +0.41 |
+| 2 | 128 B | +0.37 … +0.41 |
+| 1 | 72 B | **+0.37** |
+
+A 3.3× smaller value buys about one timer tick. **Not taken, and the reason is the trade rather than the
+size:** `CORSMiddleware` contributes up to four fields, so capacity 1 sends it to the overflow array and
+puts an allocation back exactly where the inline storage earns its place; capacity 2 measures no better
+than 4. The size is a real cost with no good lever on it.
+
+The remaining ~0.08 is the register-now-apply-later shape itself. Hummingbird writes `fields[name] =
+value` at the moment it holds the response; WireMVC has to store a *description* of the operation, carry
+it, then walk the registrations and dispatch on the case (`.set` / `.append` / `.setIfAbsent`) to replay
+it. That is what buys the head going out as soon as the handler decides it, and it is not free. Whether it
+is irreducible is untested — the obvious lever is a fast path for the overwhelmingly common case, one
+`.value` registration with no deferred and no overflow, applied without the walk. By the arithmetic above
+that is worth perhaps 0.03 … 0.05 µs, which is small enough that it should be measured before it is
+written rather than after.
+
+**None of this is worth doing.** The whole 0.12 is under 0.2% of the ~78 µs a real request costs, against a
+bridge at 16–47 µs. It is documented so the number has an explanation attached, not because it is an
+opportunity.
+
 > **These two rows were wrong here until the driver was fixed, and the error was 15 µs.**
 > `HTTPResponder.respond` is `@Sendable`, this package enables `NonisolatedNonsendingByDefault` and
 > Hummingbird does not, so driving it from a `nonisolated(nonsending)` caller hopped to the global executor
