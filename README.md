@@ -244,6 +244,11 @@ plausible cause with an allocation delta of the right size.
 WireMVC's native tiers allocate 3 objects and 243 bytes per request — a fifteenth of the Hummingbird
 bridge.
 
+**These rows predate wire-mvc `f9d6e24`**, which took two allocations off `FrozenRouteTrie.resolve` (see
+[walking the path](#walking-the-path-rather-than-splitting-it)). The two WireMVC router rows should now be
+two lower; they have not been re-taken socketed, because the difference is smaller than that instrument's
+spread. The bridge rows are unaffected — the host's router matches there and `resolve` never runs.
+
 ### The in-process floor
 
 Driven in process — no socket, no HTTP client, no kernel — WireMVC's whole native path costs:
@@ -270,20 +275,27 @@ is more useful than either number alone. The two now agree: the socketed row rea
 
 ### What WireMVC allocates, and whether it needs to
 
-**Twelve allocations and 920 bytes per request**, bisected in process. Re-measured 2026-08-25 against
-wire-mvc `1437735`; it read nine and 756 when this section was first written, and where the difference
-went is the interesting part:
+**Ten allocations and 760 bytes per request**, bisected in process. Re-measured 2026-08-30 against
+wire-mvc `f9d6e24`; it read twelve and 920 against `1437735`, nine and 756 when this section was first
+written, and where each difference went is the interesting part:
 
 ```
 what                                          allocs/req   bytes/req
-literal route, handler does nothing                  2.0         224
+literal route, handler does nothing                  0.0          64   ← was 2.0/224; see below
 + binding one {parameter}                           +2.0        +232
 + building and writing the response                 +4.0        +262
 + stating a Content-Length                          +4.0        +258
 + WireMVCOutcome's `[:]` default                    +1.0         +92   ← found here, now fixed
 + ResponseHeaderRegistry (the courier)              +0.0          +0   ← see below; now +0 for real
-                                                    12.0         920
+                                                    10.0         760
 ```
+
+**The 64 bytes on a row reading zero allocations are the harness's, not the library's.** `allocount.c`'s
+`counted_realloc` adds to `bytes` without incrementing `calls`, so the driver's own sample buffer shows up
+as bytes with no call behind them. It is the same 64.0 in every case that reaches zero — `literal-route`
+and `deep-literal` alike, whatever the path depth — which is what identifies it as a floor rather than a
+residue of the code under test. It was inside the old 224 too. Subtract it before quoting a byte figure as
+WireMVC's.
 
 Each row is a pair of cases differing in exactly one thing, and every figure reproduces to the allocation
 across runs. The method is the *slope* rather than a single total: each case is run at 22,000 and 62,000
@@ -342,11 +354,11 @@ explain it, since `WireMVCContextHandler` is untouched and the after-figure is z
 For contrast, **Hummingbird's router adds none** — its routed and routerless scenarios allocate the same.
 So these are not the cost of routing as such; they are choices in this implementation. Four look avoidable:
 
-- **The two baseline allocations.** `FrozenRouteTrie.resolve` does
-  `requestPath.split(separator: "/", omittingEmptySubsequences: true)`, materialising an `[Substring]` for
-  every request before walking it. The walk is a single forward pass and does not need the array — it
-  could iterate segments lazily. This is the clearest candidate, and it costs even routes with no
-  parameters.
+- ~~**The two baseline allocations.**~~ **Done, and the diagnosis held exactly.** This read
+  "`FrozenRouteTrie.resolve` does `requestPath.split(separator: "/", omittingEmptySubsequences: true)`,
+  materialising an `[Substring]` for every request before walking it — the walk is a single forward pass
+  and does not need the array". It now walks the path with a cursor, and the array is gone. Measured below:
+  **−2 allocations and −160 bytes on every case that routes**, and −4 on a five-segment one.
 - **The two parameter allocations.** Values are collected positionally and then built into a
   `[String: Substring]` via `Dictionary(zip(...))`. Most routes bind nought to two parameters, where a
   small inline buffer would avoid the dictionary entirely, and the handler's lookup by name could resolve
@@ -372,7 +384,54 @@ numbers that matter; these are the ones that would still be there after the brid
 
 Note that the first two do not exist on a *bridged* runtime at all: there the host's router matches the
 path and parameters arrive as `metadata.pathParameters`, so `FrozenRouteTrie.resolve` never runs. The two
-clearest wins here are native-path-only.
+clearest wins here are native-path-only — which is why the one now taken shows up on every in-process
+case below and would not have shown up on a bridged one at all.
+
+#### Walking the path rather than splitting it
+
+wire-mvc `f9d6e24` against its parent `ee9693d`, so the one commit is the only variable. Two release
+builds of this harness, `swift package edit wire-mvc --path` at each worktree, the binaries copied out and
+run alternately rather than one arm after the other.
+
+Allocations, by the same slope method:
+
+| case | before | after | delta |
+|---|---|---|---|
+| `deep-literal` (five segments) | 4.000 / 672 B | **0.000 / 64 B** | −4.00, −608 B |
+| `literal-route` (two segments) | 2.000 / 224 B | **0.000 / 64 B** | −2.00, −160 B |
+| `route-only` | 4.000 / 456 B | 2.000 / 296 B | −2.00, −160 B |
+| `+parameter` | 4.000 / 456 B | 2.000 / 296 B | −2.00, −160 B |
+| `trie-only` | 8.000 / 718 B | 6.000 / 558 B | −2.00, −160 B |
+| `+trie-length` | 12.000 / 976 B | 10.000 / 816 B | −2.00, −160 B |
+| `+outcome` | 12.000 / 920 B | 10.000 / 760 B | −2.00, −160 B |
+| `routed-match` | 11.000 / 884 B | 9.000 / 724 B | −2.00, −160 B |
+
+**The predicted 2-and-4 is what the before column reads, and both go to zero.** `literal-route`'s
+2.0 / 224 reproduced the figure recorded above to the byte before anything was changed, which is the
+control that says this instrument is comparable to the run those numbers came from.
+
+**The change also shows up on the clock, which the commit declined to claim.** Three replicates, arms
+interleaved, `ROUNDS=6 WARMUP=2000 ITERATIONS=20000`, p50 µs:
+
+| case | before | after | delta |
+|---|---|---|---|
+| `deep-literal` | 0.50 / 0.46 / 0.46 | 0.38 / 0.38 / 0.38 | **−0.08 … −0.12** |
+| `literal-route` | 0.46 / 0.46 / 0.46 | 0.42 / 0.42 / 0.42 | **−0.04** |
+| `trie-only` | 0.79 / 0.83 / 0.83 | 0.75 / 0.75 / 0.75 | −0.04 … −0.08 |
+| `routed-match` | 0.88 / 0.92 / 0.88 | 0.83 / 0.83 / 0.83 | −0.05 … −0.09 |
+
+No overlap between the arms on any case, and `deep-literal`'s p99 moves 0.75 / 0.62 / 0.67 to
+0.54 / 0.50 / 0.50. This is at the edge of what the in-process clock resolves — the quantum is about
+0.04 µs — so the evidence is the *separation across replicates*, not any single figure.
+
+**The depth ordering inverts, and that is the claim landing rather than a curiosity.** Before,
+`deep-literal` cost at least what `literal-route` did; after, it is the *faster* of the two (0.38 against
+0.42). The array growth scaled with segments and the walk scales with characters, and `/a/b/c/d/e` is
+shorter than `/echo/benchmark`. A deeper route used to pay more and now pays less.
+
+**Not run socketed, deliberately.** ~0.05 µs against a ~78 µs floor with ±1.6 µs of run-to-run spread is
+below what that instrument resolves, so a null result there would have meant nothing and a positive one
+would have been noise.
 
 ### The ordering problem, and what it invalidated
 
@@ -559,6 +618,17 @@ swiftly run swift package update wire-mvc
 
 And if you have been iterating on the library locally with `swift package edit`, `swift package unedit
 wire-mvc` before quoting anything as reflecting merged main — an edited checkout reads your working tree.
+
+**`swift-wire` has to move with it.** wire-mvc's route codegen and swift-wire's `@Scoped` machinery are
+versioned together, so updating one alone fails in *generated* code rather than anywhere you would think to
+look — `_WireRoutes.swift: value of tuple type '(…Controller, … () async -> [any Error])' has no member
+'_wireSubject'` is a swift-wire that is behind, not a broken plugin. `swift package update swift-wire`
+alongside the line above.
+
+**To A/B two revisions of the library**, `swift package edit wire-mvc --path <worktree>` at each in turn,
+build `-c release`, and copy the binary out of `--show-bin-path` before uneditting. The copies run from
+anywhere, so the two arms can be *interleaved* rather than measured one after the other — which matters
+here for the same reason the shuffled rounds do.
 
 Knobs, all environment variables:
 
