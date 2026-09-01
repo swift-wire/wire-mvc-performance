@@ -14,7 +14,6 @@ let package = Package(
         .library(name: "WireMVCVaporNative", targets: ["WireMVCVaporNative"])
     ],
     dependencies: [
-        .package(path: "../.."),
         .package(url: "https://github.com/tachyonics/wire-mvc.git", branch: "main"),
         .package(url: "https://github.com/vapor/vapor.git", from: "4.115.0"),
         .package(url: "https://github.com/apple/swift-http-api-proposal.git", .upToNextMinor(from: "0.2.0")),
