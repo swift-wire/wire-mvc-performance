@@ -9,8 +9,12 @@
 set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
-project="$(basename "$root")"
 cd "$root"
+
+# Every repository in the family carries swift-wire's notice rather than its own. They are one
+# project distributed across several repositories, and a per-repository holder would fragment the
+# copyright for no gain — the same reason the SwiftNIO repositories all name the SwiftNIO project.
+project="swift-wire"
 
 spdx='// SPDX-License-Identifier: Apache-2.0'
 copyright="// Copyright (c) [0-9]\{4\} the ${project} project authors"
@@ -18,7 +22,7 @@ copyright="// Copyright (c) [0-9]\{4\} the ${project} project authors"
 fail=0
 while IFS= read -r file; do
     # The SPDX line is first, except in a manifest, where `// swift-tools-version:` must stay on
-    # line 1, and in a file carrying an upstream notice above its own.
+    # line 1, and in a file carrying an upstream notice above this project's own.
     if ! head -5 "$file" | grep -qxF "$spdx"; then
         echo "missing SPDX identifier: $file"
         fail=1
