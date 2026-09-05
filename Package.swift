@@ -18,7 +18,7 @@ let package = Package(
     ],
     dependencies: [
         // The `ServerTransport` trait is what the bridged scenario measures.
-        .package(url: "https://github.com/tachyonics/wire-mvc.git", branch: "main", traits: ["ServerTransport"]),
+        .package(url: "https://github.com/swift-wire/wire-mvc.git", branch: "main", traits: ["ServerTransport"]),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
         .package(url: "https://github.com/swift-server/swift-openapi-hummingbird.git", from: "2.0.0"),
         .package(url: "https://github.com/vapor/vapor.git", from: "4.115.0"),
@@ -26,7 +26,7 @@ let package = Package(
         .package(url: "https://github.com/swift-server/swift-http-server.git", branch: "main"),
         .package(url: "https://github.com/apple/swift-http-api-proposal.git", .upToNextMinor(from: "0.2.0")),
         // Direct, for the codegen target: `@Singleton`, `@Inject` and `@Scoped(seed:)` come from Wire.
-        .package(url: "https://github.com/tachyonics/swift-wire.git", branch: "main"),
+        .package(url: "https://github.com/swift-wire/swift-wire.git", branch: "main"),
         // The native-adapter prototypes, local to this repo while they are only being measured.
         // The Hummingbird adapter lives in its own repo now. A sibling path rather than a URL because it
         // is unpublished — a checkout without it beside this one will not resolve, which is the honest
