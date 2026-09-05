@@ -1,4 +1,7 @@
 // swift-tools-version: 6.4
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 the wire-mvc-performance project authors
+
 import PackageDescription
 
 // A benchmark harness for WireMVC's per-request cost, isolated in its own package so no shipping target

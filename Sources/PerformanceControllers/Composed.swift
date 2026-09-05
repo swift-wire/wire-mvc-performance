@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 the wire-mvc-performance project authors
+
 package import WireMVC
 
 // The generated graph is `internal` to this module and its bootstrap is file-private, so nothing outside
