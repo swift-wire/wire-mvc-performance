@@ -1,0 +1,20 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+
+  LicenceHeaders:
+    name: Licence headers
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      # Pure git and shell, so this gate needs no toolchain and answers in seconds. It is a
+      # separate job rather than a step on an existing one because a missing header is not a
+      # build error: nothing else in the toolchain looks, so without this the omission is silent.
+      - name: Check SPDX headers
+        run: ./Scripts/check-license-headers.sh
