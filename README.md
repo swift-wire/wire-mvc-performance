@@ -687,3 +687,7 @@ Sources/WireMVCPerformance/
   InProcess.swift       # the in-process bisection: no socket, no client, no kernel
 Tools/allocount.c       # a malloc/calloc/realloc interposer, for per-request allocation counts
 ```
+
+## Licence
+
+Apache-2.0. See [LICENSE](LICENSE).
