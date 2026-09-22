@@ -1,3 +1,12 @@
+<p align="center">
+  <a href="https://github.com/swift-wire/wire-mvc-performance/actions/workflows/build.yml">
+    <img src="https://github.com/swift-wire/wire-mvc-performance/actions/workflows/build.yml/badge.svg" alt="Build">
+  </a>
+  <a href="https://www.apache.org/licenses/LICENSE-2.0">
+    <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0">
+  </a>
+</p>
+
 # wire-mvc-performance
 
 A benchmark harness isolating **where WireMVC's per-request cost goes** — its own tiers, the HTTP server

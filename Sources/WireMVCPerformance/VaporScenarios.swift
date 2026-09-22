@@ -7,8 +7,8 @@ import OpenAPIVapor
 import ServiceLifecycle
 import Vapor
 import WireMVC
-import WireMVCVaporNative
 import WireMVCServerTransport
+import WireMVCVaporNative
 
 // Vapor's scenarios live in their own file: Hummingbird and Vapor both define `Application`, `Request`
 // and `Response`, so sharing one file would mean qualifying every use of all three.

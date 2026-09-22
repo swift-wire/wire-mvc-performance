@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the swift-wire project authors
 
+public import BasicContainers
 public import HTTPAPIs
 public import HTTPTypes
+public import NIOCore
 public import Vapor
 public import WireMVC
-
-public import BasicContainers
-public import NIOCore
 
 // Mount WireMVC's collated routes on Vapor's own router.
 //

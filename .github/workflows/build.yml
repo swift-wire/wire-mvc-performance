@@ -6,7 +6,71 @@ on:
   pull_request:
     branches: [ main ]
 
+# The harness depends on `../wire-mvc-hummingbird` by sibling path (see Package.swift), so a build needs
+# two checkouts side by side. Both land under the workspace — this repo in `wire-mvc-performance/`, the
+# adapter in `wire-mvc-hummingbird/` — and every build step runs from the first, where `..` then resolves
+# the second. The toolchain is the one named in `.swift-version`, installed through swift-wire/setup-swift; the format
+# and lint jobs need no build, so they check out this repo alone at the workspace root.
+#
+# No Static Linux SDK cross-compile, unlike the library repos: the harness links NIOHTTPServer
+# unconditionally (it is one of the servers under measurement), and swift-http-server does not compile
+# for the musl target on 6.4.0. It is a benchmark, not something anyone deploys, so nothing is lost.
 jobs:
+  Build:
+    name: Swift 6.4 (pinned)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: wire-mvc-performance
+      - uses: actions/checkout@v6
+        with:
+          repository: swift-wire/wire-mvc-hummingbird
+          path: wire-mvc-hummingbird
+      - name: Read the pinned toolchain
+        # The action reads `.swift-version` from the working directory, which here is the workspace
+        # root rather than this repo's checkout, so the version is read and passed explicitly.
+        run: echo "SWIFT_TOOLCHAIN=$(cat wire-mvc-performance/.swift-version)" >> "$GITHUB_ENV"
+      - uses: swift-wire/setup-swift@v1
+        with:
+          swift-version: ${{ env.SWIFT_TOOLCHAIN }}
+      - name: Build
+        # Release, because that is the only configuration the harness is ever run in (README:
+        # "a debug build measures the optimiser's absence, not the framework"). `Package.resolved` is
+        # not committed, so this resolves wire-mvc and swift-wire main fresh — which is the point: the
+        # harness must keep building against the library it measures.
+        working-directory: wire-mvc-performance
+        run: swift build -c release
+
+  SwiftFormat:
+    name: swift-format (pinned)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: swift-wire/setup-swift@v1
+      - name: Run swift-format
+        # From the pinned toolchain so it parses the proposal's ~Copyable / consuming sending syntax.
+        run: swift-format format --recursive --in-place .
+      - name: Check for formatting differences
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git diff --exit-code
+
+  SwiftLint:
+    name: SwiftLint 0.63.2
+    # `swiftlint lint` is SwiftSyntax-based and parses the 6.4 sources fine, so it needs no toolchain
+    # and runs on a plain runner.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install SwiftLint
+        # The prebuilt Linux binary needs the GLIBC on ubuntu-24.04+.
+        run: |
+          curl -sL https://github.com/realm/SwiftLint/releases/download/0.63.2/swiftlint_linux_amd64.zip -o swiftlint.zip
+          unzip -o swiftlint.zip -d /usr/local/bin
+          chmod +x /usr/local/bin/swiftlint
+      - name: SwiftLint
+        run: swiftlint lint --quiet
 
   LicenceHeaders:
     name: Licence headers

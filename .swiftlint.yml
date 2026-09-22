@@ -1,0 +1,19 @@
+disabled_rules:
+  - trailing_whitespace
+  - void_return
+  # swift-format owns brace placement; it puts the opening brace on its own line after a
+  # multi-line `where` clause (which the proposal's ~Copyable generic constraints require),
+  # which this rule disagrees with. Cede formatting to the formatter — the same resolution
+  # wire-mvc reached.
+  - opening_brace
+  # Same resolution, same reason: swift-format adds a trailing comma to every multi-line collection
+  # literal and re-adds it if removed, so the two tools cannot both be satisfied. The formatter wins.
+  - trailing_comma
+included:
+  - Sources
+  # The native Vapor adapter is its own package (see Package.swift) but still this repo's code.
+  - NativeAdapters/WireMVCVaporNative/Sources
+line_length: 150
+function_body_length:
+  warning: 50
+  error: 75

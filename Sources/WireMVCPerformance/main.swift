@@ -24,8 +24,10 @@ let iterations = ProcessInfo.processInfo.environment["ITERATIONS"].flatMap(Int.i
 let rounds = ProcessInfo.processInfo.environment["ROUNDS"].flatMap(Int.init) ?? 6
 
 let all: [any Scenario] = [
-    HummingbirdRaw(), HummingbirdPlain(), HummingbirdHeaders(), HummingbirdTyped(), HummingbirdNative(), HummingbirdBridged(),
-    VaporRaw(), VaporRawAsync(), VaporRoutedAsync(), VaporPlain(), VaporHeaders(), VaporHeadersTwice(), VaporHeadersFuture(), VaporTyped(), VaporNative(), VaporBridged(),
+    HummingbirdRaw(), HummingbirdPlain(), HummingbirdHeaders(), HummingbirdTyped(), HummingbirdNative(),
+    HummingbirdBridged(),
+    VaporRaw(), VaporRawAsync(), VaporRoutedAsync(), VaporPlain(), VaporHeaders(), VaporHeadersTwice(),
+    VaporHeadersFuture(), VaporTyped(), VaporNative(), VaporBridged(),
     ProposalPlain(), ProposalPlainServed(), ProposalRouted(), ProposalFused(),
     ProposalWrapped(), ProposalHeaders(), ProposalNative(),
     ScopedControllerScenario(
@@ -438,16 +440,16 @@ for (label, with, without) in [
     ("WireMVC + bridge, Hummingbird", "hummingbird-bridged", "hummingbird-plain"),
     ("WireMVC + bridge, Vapor      ", "vapor-bridged", "vapor-plain"),
 ] {
-    guard let a = byName[with], let b = byName[without] else { continue }
+    guard let measured = byName[with], let baseline = byName[without] else { continue }
     // Reported at three points, because a difference that only appears in the tail is a different claim
     // from one that shifts the whole distribution.
     print(
         String(
             format: "  %@ min %+7.2f   p50 %+7.2f   p99 %+8.2f µs",
             label,
-            a.minimum - b.minimum,
-            a.percentile(50) - b.percentile(50),
-            a.percentile(99) - b.percentile(99)
+            measured.minimum - baseline.minimum,
+            measured.percentile(50) - baseline.percentile(50),
+            measured.percentile(99) - baseline.percentile(99)
         )
     )
 }
@@ -462,14 +464,14 @@ for (label, routed, raw) in [
     ("WireMVC's handler, same serve", "proposal-native", "proposal-plain-served"),
     ("the courier + registry       ", "proposal-native", "proposal-routed"),
 ] {
-    guard let a = byName[routed], let b = byName[raw] else { continue }
+    guard let measured = byName[routed], let baseline = byName[raw] else { continue }
     print(
         String(
             format: "  %@ min %+7.2f   p50 %+7.2f   p99 %+8.2f µs",
             label,
-            a.minimum - b.minimum,
-            a.percentile(50) - b.percentile(50),
-            a.percentile(99) - b.percentile(99)
+            measured.minimum - baseline.minimum,
+            measured.percentile(50) - baseline.percentile(50),
+            measured.percentile(99) - baseline.percentile(99)
         )
     )
 }
@@ -483,14 +485,14 @@ for (label, withHeader, without) in [
     ("Vapor's *second* middleware  ", "vapor-headers-2", "vapor-headers"),
     ("Vapor, future-based instead  ", "vapor-headers-future", "vapor-plain"),
 ] {
-    guard let a = byName[withHeader], let b = byName[without] else { continue }
+    guard let measured = byName[withHeader], let baseline = byName[without] else { continue }
     print(
         String(
             format: "  %@ min %+7.2f   p50 %+7.2f   p99 %+8.2f µs",
             label,
-            a.minimum - b.minimum,
-            a.percentile(50) - b.percentile(50),
-            a.percentile(99) - b.percentile(99)
+            measured.minimum - baseline.minimum,
+            measured.percentile(50) - baseline.percentile(50),
+            measured.percentile(99) - baseline.percentile(99)
         )
     )
 }

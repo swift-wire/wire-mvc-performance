@@ -136,7 +136,9 @@ func courierHeadersRouter() -> some HTTPServerRequestHandler<
 ///
 /// So it uses the array-returning `drain()`, not `drain(into:)`, and `resolved` rather than applying onto
 /// a head. `contributing` toggles the contribution so the pair's difference is the mechanism.
-func typedRouter(contributingAHeader: Bool) -> some HTTPServerRequestHandler<
+func typedRouter(
+    contributingAHeader: Bool
+) -> some HTTPServerRequestHandler<
     BenchRequestContext, BenchReader, BenchResponseSender
 > {
     var builder = TrieRouteBuilder<
@@ -344,7 +346,9 @@ let inProcessCases: [InProcessCase] = [
         router { _, _, parameters, _, responseSender in
             let value = parameters[SharedRoute.template].map(String.init) ?? "<none>"
             try await WireMVCOutcome(
-                status: .ok, headerFields: HTTPFields(), body: SharedRoute.body(for: value)
+                status: .ok,
+                headerFields: HTTPFields(),
+                body: SharedRoute.body(for: value)
             ).send(on: responseSender)
         }
     },

@@ -2,9 +2,9 @@
 // Copyright (c) 2026 the swift-wire project authors
 
 import Foundation
+import HTTPTypes
 import Hummingbird
 import Logging
-import HTTPTypes
 import NIOCore
 
 // Hummingbird driven **in process** — its router and middleware exercised without a socket, so its header
