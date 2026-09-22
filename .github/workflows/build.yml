@@ -27,6 +27,26 @@ jobs:
         with:
           repository: swift-wire/wire-mvc-hummingbird
           path: wire-mvc-hummingbird
+      - name: Read the pinned toolchain
+        # The action reads `.swift-version` from the working directory, which here is the workspace
+        # root rather than this repo's checkout, so the version is read and passed explicitly.
+        run: echo "SWIFT_TOOLCHAIN=$(cat wire-mvc-performance/.swift-version)" >> "$GITHUB_ENV"
+      - uses: swift-wire/setup-swift@v1
+        with:
+          swift-version: ${{ env.SWIFT_TOOLCHAIN }}
+      - name: Build
+        # Release, because that is the only configuration the harness is ever run in (README:
+        # "a debug build measures the optimiser's absence, not the framework"). `Package.resolved` is
+        # not committed, so this resolves wire-mvc and swift-wire main fresh — which is the point: the
+        # harness must keep building against the library it measures.
+        working-directory: wire-mvc-performance
+        run: swift build -c release
+
+  SwiftFormat:
+    name: swift-format (pinned)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
       - uses: swift-wire/setup-swift@v1
       - name: Run swift-format
         # From the pinned toolchain so it parses the proposal's ~Copyable / consuming sending syntax.
