@@ -2,10 +2,9 @@
 // Copyright (c) 2026 the swift-wire project authors
 
 public import HTTPTypes
+import NIOHTTP1
 public import Vapor
 public import WireMVC
-
-import NIOHTTP1
 
 /// An `HTTPServerRouteBuilder` that registers WireMVC's collated routes on Vapor's own router.
 public struct WireMVCVaporRouteBuilder: HTTPServerRouteBuilder {

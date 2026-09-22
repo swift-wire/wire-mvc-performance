@@ -406,7 +406,8 @@ struct ProposalWrapped: Scenario {
             var body = UniqueArray<UInt8>(copying: bytes)
             let applyingContents = context.takeContents()
             let applying = ResponseHeaderApplyingSender(
-                wrapping: sender, registry: applyingContents.responseHeaders.take()
+                wrapping: sender,
+                registry: applyingContents.responseHeaders.take()
             )
             try await applying.sendAndFinish(
                 HTTPResponse(status: .ok, headerFields: fields),
@@ -511,10 +512,12 @@ func serveHummingbird(
 func hummingbirdBody(for value: String) -> ResponseBody {
     let buffer = ByteBuffer(bytes: SharedRoute.body(for: value))
     guard statesContentLength else {
-        return .init(asyncSequence: AsyncStream<ByteBuffer> { continuation in
-            continuation.yield(buffer)
-            continuation.finish()
-        })
+        return .init(
+            asyncSequence: AsyncStream<ByteBuffer> { continuation in
+                continuation.yield(buffer)
+                continuation.finish()
+            }
+        )
     }
     return .init(byteBuffer: buffer)
 }

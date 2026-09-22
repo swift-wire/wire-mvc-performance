@@ -104,6 +104,6 @@ let package = Package(
                 .enableUpcomingFeature("MemberImportVisibility"),
                 .enableUpcomingFeature("InternalImportsByDefault"),
             ]
-        )
+        ),
     ]
 )
