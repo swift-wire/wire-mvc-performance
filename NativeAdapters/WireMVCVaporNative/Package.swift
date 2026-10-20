@@ -12,7 +12,7 @@ import PackageDescription
 // since Vapor's own cost centre is the `async`/`EventLoopFuture` boundary rather than body conversion.
 let package = Package(
     name: "wire-mvc-vapor-native",
-    platforms: [.macOS(.v26)],
+    platforms: [.macOS(.v27)],
     products: [
         .library(name: "WireMVCVaporNative", targets: ["WireMVCVaporNative"])
     ],

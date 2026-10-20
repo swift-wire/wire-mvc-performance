@@ -8,11 +8,12 @@ import PackageDescription
 // carries a benchmark dependency, and so the servers under test can be assembled by hand rather than
 // through codegen.
 //
-// tools-version 6.4 and macOS 26 because WireMVC is proposal-native (it dispatches over
-// swift-http-api-proposal's `HTTPServer`), which is the floor its runtimes already sit on.
+// tools-version 6.4 and macOS 27 because that is WireMVC's floor: it is proposal-native (it dispatches
+// over swift-http-api-proposal's `HTTPServer`), and it serves on swift-http-server's `NIOHTTPServer`,
+// which is available only from macOS 27.
 let package = Package(
     name: "wire-mvc-performance",
-    platforms: [.macOS(.v26)],
+    platforms: [.macOS(.v27)],
     products: [
         .executable(name: "wire-mvc-performance", targets: ["WireMVCPerformance"])
     ],
@@ -23,18 +24,7 @@ let package = Package(
         .package(url: "https://github.com/swift-server/swift-openapi-hummingbird.git", from: "2.0.0"),
         .package(url: "https://github.com/vapor/vapor.git", from: "4.115.0"),
         .package(url: "https://github.com/swift-server/swift-openapi-vapor.git", from: "1.0.0"),
-        // Held at a revision rather than tracking main, because `Package.resolved` is not committed and so
-        // the manifest is the only place a hold can live. Main past this commit raises the package's
-        // availability to macOS 27 ("'NIOHTTPServer' is only available in macOS 27.0 or newer") and
-        // changes the API the harness and wire-mvc serve on. A revision is accepted here only because
-        // nothing else in this graph requires swift-http-server: wire-mvc does so through its
-        // `NIOHTTPServer` trait, which this package does not enable, and SwiftPM refuses a revision next
-        // to wire-mvc's `branch: "main"` for the same package. Back to `branch: "main"` once wire-mvc has
-        // adapted to the new swift-http-server.
-        .package(
-            url: "https://github.com/swift-server/swift-http-server.git",
-            revision: "b31b98d1a2dd6e2d25dcfe974b6d9788946f61cd"
-        ),
+        .package(url: "https://github.com/swift-server/swift-http-server.git", branch: "main"),
         // Bounded for one reason: swift-collections 1.7 breaks swift-async-algorithms 1.1.5, which
         // swift-http-api-proposal 0.2.x and wire-mvc require exactly ("'RangeReplaceableContainer' is only
         // available in macOS 27.0 or newer" in its `AsyncReader+collect.swift`). Nothing here imports it.

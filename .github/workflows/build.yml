@@ -13,8 +13,9 @@ on:
 # and lint jobs need no build, so they check out this repo alone at the workspace root.
 #
 # No Static Linux SDK cross-compile, unlike the library repos: the harness links NIOHTTPServer
-# unconditionally (it is one of the servers under measurement), and swift-http-server does not compile
-# for the musl target on 6.4.0. It is a benchmark, not something anyone deploys, so nothing is lost.
+# unconditionally (it is one of the servers under measurement), and swift-http-server did not compile
+# for the musl target on 6.4.0 until its #138. It is a benchmark, not something anyone deploys, so
+# nothing is lost by leaving it out.
 jobs:
   Build:
     name: Swift 6.4 (pinned)
