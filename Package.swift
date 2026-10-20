@@ -23,7 +23,23 @@ let package = Package(
         .package(url: "https://github.com/swift-server/swift-openapi-hummingbird.git", from: "2.0.0"),
         .package(url: "https://github.com/vapor/vapor.git", from: "4.115.0"),
         .package(url: "https://github.com/swift-server/swift-openapi-vapor.git", from: "1.0.0"),
-        .package(url: "https://github.com/swift-server/swift-http-server.git", branch: "main"),
+        // Held at a revision rather than tracking main, because `Package.resolved` is not committed and so
+        // the manifest is the only place a hold can live. Main past this commit raises the package's
+        // availability to macOS 27 ("'NIOHTTPServer' is only available in macOS 27.0 or newer") and
+        // changes the API the harness and wire-mvc serve on. A revision is accepted here only because
+        // nothing else in this graph requires swift-http-server: wire-mvc does so through its
+        // `NIOHTTPServer` trait, which this package does not enable, and SwiftPM refuses a revision next
+        // to wire-mvc's `branch: "main"` for the same package. Back to `branch: "main"` once wire-mvc has
+        // adapted to the new swift-http-server.
+        .package(
+            url: "https://github.com/swift-server/swift-http-server.git",
+            revision: "b31b98d1a2dd6e2d25dcfe974b6d9788946f61cd"
+        ),
+        // Bounded for one reason: swift-collections 1.7 breaks swift-async-algorithms 1.1.5, which
+        // swift-http-api-proposal 0.2.x and wire-mvc require exactly ("'RangeReplaceableContainer' is only
+        // available in macOS 27.0 or newer" in its `AsyncReader+collect.swift`). Nothing here imports it.
+        // Drop the line once the graph can take swift-async-algorithms 1.1.6 or later.
+        .package(url: "https://github.com/apple/swift-collections.git", "1.6.0"..<"1.7.0"),
         .package(url: "https://github.com/apple/swift-http-api-proposal.git", .upToNextMinor(from: "0.2.0")),
         // Direct, for the codegen target: `@Singleton`, `@Inject` and `@Scoped(seed:)` come from Wire.
         .package(url: "https://github.com/swift-wire/swift-wire.git", branch: "main"),
